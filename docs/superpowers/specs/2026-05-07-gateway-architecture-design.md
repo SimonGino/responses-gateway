@@ -120,12 +120,17 @@ A2 内部还分 **Intercept-and-Translate** vs **Monkey-Patch** vs **Vendor**:
    parent_id = previous_response_id or None
    ttl_at = now() + config.session.default_ttl
 
-   if size(input_json + output_json) > config.cold.threshold_bytes:
-     cold_key = cold_storage.put({input, output})
-     INSERT (id, session_id, parent_id, model, provider,
-             input_json=null, output_json=null,
-             usage_json, cold_storage_key=cold_key,
-             created_at, ttl_at)
+   if size(serialize(input_json) + serialize(output_json)) > config.cold.threshold_bytes:
+     try:
+       cold_key = cold_storage.put({input, output})
+       INSERT (id, session_id, parent_id, model, provider,
+               input_json=null, output_json=null,
+               usage_json, cold_storage_key=cold_key,
+               created_at, ttl_at)
+     except ColdStorageWriteError:
+       # 降级:cold storage 写失败时存内联,确保不丢数据
+       log.warn("cold storage write failed, falling back to inline storage")
+       INSERT (..., input_json, output_json, usage_json, cold_storage_key=null)
    else:
      INSERT (..., input_json, output_json, usage_json, cold_storage_key=null)
 
@@ -244,7 +249,8 @@ server:
 | `previous_response_id` 已过期(TTL) | 410 | `previous_response_expired` |
 | 跨 provider 链断裂(parent.provider ≠ current.provider) | 409 | `previous_response_provider_mismatch` |
 | LiteLLM provider 错(rate limit / auth / model down) | 透传 status code | `provider_error` 包装,保留 LiteLLM 原始 message |
-| Cold storage 读失败 | 503 | `cold_storage_unavailable` |
+| Cold storage 读失败(必须读才能重建 session) | 503 | `cold_storage_unavailable` |
+| Cold storage 写失败 | 200 + warning header | 不报错,降级为内联存 DB,只 log warn |
 | DB 连接失败 | 503 | `storage_unavailable` |
 
 **所有响应带 `X-Request-Id`**(uuid7,客户端可以拿来对查日志)。
