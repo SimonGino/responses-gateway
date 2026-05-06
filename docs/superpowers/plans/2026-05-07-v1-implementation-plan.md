@@ -256,13 +256,6 @@ touch tests/__init__.py tests/unit/__init__.py tests/integration/__init__.py tes
 ```python
 """Shared pytest fixtures."""
 from __future__ import annotations
-
-import pytest
-
-
-@pytest.fixture
-def anyio_backend() -> str:
-    return "asyncio"
 ```
 
 - [ ] **Step 1.5: Update `.gitignore`** (append; existing entries already cover .venv, __pycache__)
