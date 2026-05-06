@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint-typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - run: uv pip install --system -e ".[dev]"
+      - run: ruff check gateway/ tests/
+      - run: ruff format --check gateway/ tests/
+      - run: mypy gateway/
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+        storage: [sqlite, postgres]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: gateway
+          POSTGRES_PASSWORD: gateway
+          POSTGRES_DB: gateway_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: astral-sh/setup-uv@v3
+      - run: uv pip install --system -e ".[dev,postgres]"
+      - name: Run unit + integration tests
+        env:
+          GATEWAY_TEST_STORAGE: ${{ matrix.storage }}
+          GATEWAY_TEST_POSTGRES_URL: postgresql+asyncpg://gateway:gateway@localhost:5432/gateway_test
+        run: pytest tests/unit/ tests/integration/ -v --cov=gateway --cov-report=xml
+      - uses: codecov/codecov-action@v4
+        if: matrix.python-version == '3.12' && matrix.storage == 'postgres'
+        with:
+          files: ./coverage.xml
