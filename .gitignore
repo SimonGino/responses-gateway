@@ -28,4 +28,3 @@ data/
 *.db-journal
 .coverage
 htmlcov/
-.alembic_version

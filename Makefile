@@ -1,35 +1,38 @@
-.PHONY: install test test-unit test-integration test-e2e lint format typecheck migrate dev clean
+.PHONY: install lock test test-unit test-integration test-e2e lint format typecheck migrate dev clean
 
 install:
 	uv pip install -e ".[dev,postgres,s3]"
 
+lock:
+	uv lock
+
 test:
-	pytest tests/ -v --cov=gateway --cov-report=term-missing
+	uv run pytest tests/ -v --cov=gateway --cov-report=term-missing
 
 test-unit:
-	pytest tests/unit/ -v
+	uv run pytest tests/unit/ -v
 
 test-integration:
-	pytest tests/integration/ -v
+	uv run pytest tests/integration/ -v
 
 test-e2e:
-	pytest tests/e2e/ -v -m "not smoke"
+	uv run pytest tests/e2e/ -v -m "not smoke"
 
 lint:
-	ruff check gateway/ tests/
+	uv run ruff check gateway/ tests/
 
 format:
-	ruff format gateway/ tests/
-	ruff check --fix gateway/ tests/
+	uv run ruff format gateway/ tests/
+	uv run ruff check --fix gateway/ tests/
 
 typecheck:
-	mypy gateway/
+	uv run mypy gateway/
 
 migrate:
-	alembic upgrade head
+	uv run alembic upgrade head
 
 dev:
-	uvicorn gateway.api:app --reload --host 0.0.0.0 --port 8080
+	uv run uvicorn gateway.api:app --reload --host 0.0.0.0 --port 8080
 
 clean:
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
