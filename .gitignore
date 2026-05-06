@@ -21,3 +21,11 @@ venv/
 build/
 dist/
 *.egg-info/
+
+# Data and database
+data/
+*.db
+*.db-journal
+.coverage
+htmlcov/
+.alembic_version
