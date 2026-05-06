@@ -313,10 +313,11 @@ jobs:
       - uses: astral-sh/setup-uv@v3
         with:
           enable-cache: true
-      - run: uv pip install --system -e ".[dev]"
-      - run: ruff check gateway/ tests/
-      - run: ruff format --check gateway/ tests/
-      - run: mypy gateway/
+          python-version: "3.12"
+      - run: uv sync --extra dev --frozen
+      - run: uv run ruff check gateway/ tests/
+      - run: uv run ruff format --check gateway/ tests/
+      - run: uv run mypy gateway/
 
   test:
     runs-on: ubuntu-latest
@@ -339,21 +340,23 @@ jobs:
           --health-retries 5
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
       - uses: astral-sh/setup-uv@v3
-      - run: uv pip install --system -e ".[dev,postgres]"
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync --extra dev --extra postgres --frozen
       - name: Run unit + integration tests
         env:
           GATEWAY_TEST_STORAGE: ${{ matrix.storage }}
           GATEWAY_TEST_POSTGRES_URL: postgresql+asyncpg://gateway:gateway@localhost:5432/gateway_test
-        run: pytest tests/unit/ tests/integration/ -v --cov=gateway --cov-report=xml
+        run: uv run pytest tests/unit/ tests/integration/ -v --cov=gateway --cov-report=xml
       - uses: codecov/codecov-action@v4
         if: matrix.python-version == '3.12' && matrix.storage == 'postgres'
         with:
           files: ./coverage.xml
 ```
+
+> Note: uses `uv sync --frozen` so installs are reproducible from `uv.lock`. `uv run <cmd>` then executes inside the synced venv. Python is pinned via `setup-uv@v3 with python-version` (consistent across both jobs). A placeholder smoke test (`tests/unit/test_smoke.py`) is created in Task 1 to ensure pytest finds at least one test before real test files land.
 
 - [ ] **Step 2.2: Verify YAML syntax**
 
