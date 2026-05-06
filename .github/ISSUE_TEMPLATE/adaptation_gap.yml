@@ -1,0 +1,45 @@
+name: Adaptation gap
+description: A capability supported by OpenAI Responses API but not yet bridged to a non-OpenAI provider
+title: "[gap] "
+labels: ["type/gap"]
+body:
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: What feature, what providers are affected, current LiteLLM behavior (with file:line refs)
+    validations:
+      required: true
+  - type: textarea
+    id: trigger
+    attributes:
+      label: Trigger conditions
+      description: What user demand or production signal would justify implementing this
+    validations:
+      required: true
+  - type: textarea
+    id: approach
+    attributes:
+      label: Proposed approach
+      description: Sketch the implementation strategy, or note "to be designed"
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Concrete, testable checklist
+  - type: textarea
+    id: references
+    attributes:
+      label: References
+      description: Gap analysis section, related code, related issues
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - P0
+        - P1
+        - P2
+        - P3
+    validations:
+      required: true

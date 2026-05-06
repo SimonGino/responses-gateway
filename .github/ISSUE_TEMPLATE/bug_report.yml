@@ -1,0 +1,26 @@
+name: Bug report
+description: Something is broken
+title: "[bug] "
+labels: ["type/bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: Symptom and expected behavior
+    validations:
+      required: true
+  - type: input
+    id: provider
+    attributes:
+      label: Provider / model
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: Minimal request body, response, logs
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: Gateway version, LiteLLM version, deployment mode

@@ -1,0 +1,29 @@
+name: Verification task
+description: A piece of behavior that needs to be confirmed against real providers before relying on it
+title: "[verify] "
+labels: ["type/verification"]
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What needs to be confirmed
+    validations:
+      required: true
+  - type: textarea
+    id: targets
+    attributes:
+      label: Targets
+      description: Which providers / models / configurations
+    validations:
+      required: true
+  - type: textarea
+    id: tasks
+    attributes:
+      label: Tasks
+      description: Checklist of verifications
+  - type: textarea
+    id: references
+    attributes:
+      label: References
+      description: Gap analysis section, related code
