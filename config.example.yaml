@@ -1,0 +1,34 @@
+storage:
+  url: "sqlite+aiosqlite:///./data/sessions.db"
+  cold:
+    enabled: false
+    backend: "s3"
+    bucket_url: "s3://my-bucket/sessions"
+    threshold_bytes: 1048576
+
+litellm:
+  model_list_path: ./models.yaml
+  request_timeout: 60
+  num_retries: 2
+
+session:
+  default_ttl_days: 30
+  default_store: true
+
+reject:
+  tools:
+    - web_search
+    - web_search_preview
+    - code_interpreter
+    - computer_use_preview
+  fields:
+    background: true
+    truncation: "auto"
+  workaround_url_template: "https://github.com/SimonGino/responses-gateway/issues?q=is%3Aissue+{feature}"
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+  log_level: info
+  log_format: json
+  trust_proxy_headers: true

@@ -1,0 +1,135 @@
+"""Gateway configuration. YAML file + GATEWAY_ env override."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import Any
+
+import yaml
+from pydantic import BaseModel, Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class ColdStorageConfig(BaseModel):
+    enabled: bool = False
+    backend: str = "s3"  # s3 | gcs | inmem
+    bucket_url: str | None = None
+    threshold_bytes: int = 1_048_576  # 1 MiB
+
+
+class StorageConfig(BaseModel):
+    url: str = "sqlite+aiosqlite:///./data/sessions.db"
+    cold: ColdStorageConfig = Field(default_factory=ColdStorageConfig)
+
+
+class LiteLLMConfig(BaseModel):
+    model_list_path: str | None = None
+    request_timeout: int = 60
+    num_retries: int = 2
+
+
+class SessionConfig(BaseModel):
+    default_ttl_days: int = 30
+    default_store: bool = True
+
+
+class RejectConfig(BaseModel):
+    tools: list[str] = Field(
+        default_factory=lambda: [
+            "web_search",
+            "web_search_preview",
+            "code_interpreter",
+            "computer_use_preview",
+        ]
+    )
+    fields: dict[str, Any] = Field(
+        default_factory=lambda: {"background": True, "truncation": "auto"}
+    )
+    workaround_url_template: str = (
+        "https://github.com/SimonGino/responses-gateway/issues?q=is%3Aissue+{feature}"
+    )
+
+
+class ServerConfig(BaseModel):
+    host: str = "0.0.0.0"
+    port: int = 8080
+    log_level: str = "info"
+    log_format: str = "json"
+    trust_proxy_headers: bool = True
+
+
+class GatewayConfig(BaseSettings):
+    """Top-level config. Env vars override YAML with `GATEWAY_<SECTION>__<FIELD>`."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="GATEWAY_",
+        env_nested_delimiter="__",
+        case_sensitive=False,
+    )
+
+    storage: StorageConfig = Field(default_factory=StorageConfig)
+    litellm: LiteLLMConfig = Field(default_factory=LiteLLMConfig)
+    session: SessionConfig = Field(default_factory=SessionConfig)
+    reject: RejectConfig = Field(default_factory=RejectConfig)
+    server: ServerConfig = Field(default_factory=ServerConfig)
+
+
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Recursively merge override dict into base dict, with override taking precedence."""
+    result = dict(base)
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def _parse_env_overrides() -> dict[str, Any]:
+    """Extract GATEWAY_* env vars and convert to nested dict.
+
+    GATEWAY_SERVER__PORT=8080 -> {'server': {'port': 8080}}
+    """
+    result: dict[str, Any] = {}
+    prefix = "GATEWAY_"
+    for key, value in os.environ.items():
+        if not key.startswith(prefix):
+            continue
+        # Remove prefix and convert to lowercase
+        remaining = key[len(prefix) :].lower()
+        parts = remaining.split("__")
+
+        # Navigate/create nested structure
+        current = result
+        for part in parts[:-1]:
+            if part not in current:
+                current[part] = {}
+            current = current[part]
+
+        # Try to convert value to int if it looks like a number
+        try:
+            current[parts[-1]] = int(value)
+        except ValueError:
+            # Keep as string if not an int
+            current[parts[-1]] = value
+
+    return result
+
+
+def load_config(path: Path | str) -> GatewayConfig:
+    """Load YAML config, then layer env overrides on top.
+
+    Env vars (GATEWAY_*) take precedence over YAML values.
+    """
+    p = Path(path)
+    yaml_data: dict[str, Any] = {}
+    if p.exists():
+        with p.open() as f:
+            yaml_data = yaml.safe_load(f) or {}
+
+    # Merge YAML data with env var overrides
+    env_overrides = _parse_env_overrides()
+    merged_data = _deep_merge(yaml_data, env_overrides)
+
+    return GatewayConfig(**merged_data)
