@@ -24,6 +24,9 @@ reject:
   fields:
     background: true
     truncation: "auto"
+  present_fields:
+    - conversation
+    - context_management
   workaround_url_template: "https://github.com/SimonGino/responses-gateway/issues?q=is%3Aissue+{feature}"
 
 server:

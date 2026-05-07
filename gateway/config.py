@@ -49,6 +49,9 @@ class RejectConfig(BaseModel):
     fields: dict[str, Any] = Field(
         default_factory=lambda: {"background": True, "truncation": "auto"}
     )
+    present_fields: list[str] = Field(
+        default_factory=lambda: ["conversation", "context_management"]
+    )
     workaround_url_template: str = (
         "https://github.com/SimonGino/responses-gateway/issues?q=is%3Aissue+{feature}"
     )
