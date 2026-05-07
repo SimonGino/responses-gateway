@@ -116,8 +116,29 @@ def build_app(config: GatewayConfig) -> FastAPI:
 
     @app.post("/v1/responses")
     async def create_response(request: Request, payload: dict[str, Any]) -> Any:
+        rid = getattr(request.state, "request_id", "")
+        _log.info(
+            "responses_request_received",
+            request_id=rid,
+            model=payload.get("model"),
+            has_previous_response_id=bool(payload.get("previous_response_id")),
+            stream=bool(payload.get("stream")),
+            tool_types=[t.get("type") for t in payload.get("tools") or [] if isinstance(t, dict)],
+            top_level_keys=sorted(payload.keys()),
+        )
+
         provider = provider_from_model(payload.get("model", ""))
-        validator.validate(payload, provider=provider)
+        try:
+            validator.validate(payload, provider=provider)
+        except FeatureNotSupportedError as exc:
+            _log.warn(
+                "responses_request_rejected",
+                request_id=rid,
+                model=payload.get("model"),
+                feature=exc.feature,
+                param=exc.param,
+            )
+            raise
 
         store_flag = payload.pop("store", config.session.default_store)
         streaming = bool(payload.get("stream", False))
