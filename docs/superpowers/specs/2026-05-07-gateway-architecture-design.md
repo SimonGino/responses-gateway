@@ -70,7 +70,7 @@ A2 内部还分 **Intercept-and-Translate** vs **Monkey-Patch** vs **Vendor**:
 | SessionStore | `gateway/session/store.py` | DB 抽象(SQLAlchemy 2.x async);CRUD |
 | SessionResolver | `gateway/session/resolver.py` | `previous_response_id` → 重建 chat-completions messages |
 | SessionRecorder | `gateway/session/recorder.py` | 调用后落库,生成新 `id`,处理 TTL/cold 阈值 |
-| LLMRouter | `gateway/llm.py` | `litellm.aresponses` 薄封装;读 model_list 配置 |
+| LLMRouter | `gateway/llm.py` | `litellm.aresponses` 薄封装;从 `models.yaml` 的 `model_list` 构建 `{alias → litellm-string}` 映射。**v1 不实例化 `litellm.Router`**(无 fallback chain / load balance / cooldown / virtual key —— 这些超出"协议层 + 状态化"的定位)。多 deployment 路由让上游 LB 处理 |
 | StreamBridge | `gateway/streaming.py` | 流式事件 tee:转发到客户端 + buffer 用于落库 |
 | Config | `gateway/config.py` | Pydantic Settings;YAML + env override |
 | ColdStorage | `gateway/storage/cold.py` | S3/GCS offload(可选,大 payload) |
@@ -89,68 +89,123 @@ A2 内部还分 **Intercept-and-Translate** vs **Monkey-Patch** vs **Vendor**:
 2. Validator
    - 不支持的 tool type → 422 feature_not_supported
    - background: true → 422
-   - truncation: "auto" → 422 (可加 warning header 后透传 disabled)
+   - truncation: "auto" → 422
+   - presence of `conversation` → 422 conversation_not_supported
+   - presence of `context_management` → 422 feature_not_supported
+   - `previous_response_id` AND `conversation` 同时出现 → 422
+   (具体支持矩阵见 §6 reject 列表)
 
-3. SessionResolver
+3. **Generate gateway-side response id**
+   new_id = "resp_" + uuid7()
+   # 提前生成 —— 流式必须在 response.created 事件就拿到最终 id 给客户端,
+   # 否则客户端拿到的是 LiteLLM 自己生成的 id,后续 previous_response_id 会 404
+
+4. SessionResolver
    if previous_response_id given:
-     row = SELECT * FROM sessions WHERE id = $1
-     if not row: 404 previous_response_not_found
-     if row.ttl_at < NOW(): 410 previous_response_expired
-     if row.provider != requested_provider: 409 previous_response_provider_mismatch
+     parent = SELECT * FROM sessions WHERE id = $1
+     if not parent: 404 previous_response_not_found
+     if parent.ttl_at < NOW(): 410 previous_response_expired
+     if parent.provider != requested_provider: 409 previous_response_provider_mismatch
+     # cross-provider 不支持 (§4.3)
 
-     all = SELECT * FROM sessions WHERE session_id = row.session_id ORDER BY created_at
+     # 沿 parent_id 回溯到根,而非 SELECT WHERE session_id = X
+     # session_id 全量查会把分叉的 sibling 也拼进来,违反 chained linear history 语义
+     chain = []
+     visited = set()
+     cur = previous_response_id
+     while cur and cur not in visited:
+       visited.add(cur)
+       row = get_by_id(cur)
+       if not row: break
+       chain.append(row)
+       cur = row.parent_id
+     chain.reverse()
+
      messages = []
-     for r in all:
-       # transform r.input_json (Responses input) → chat messages
-       # append r.output_json's message items as assistant messages
+     for r in chain:
+       # 重建历史时只取 user/assistant 内容,丢弃旧 instructions
+       # —— OpenAI 语义:previous_response_id 不继承旧 instructions,新 instructions 是唯一 system prompt
+       past_user = extract_user_input_items(r.input_json)   # 不含 instructions/system
+       past_assistant = r.output_json.get("output", [])     # message + function_call items
+       messages.extend(past_user)
+       messages.extend(past_assistant)
      prepend messages to current input
      drop previous_response_id from request
 
-4. LLMRouter
+5. LLMRouter
+   # 把 model 别名(如 default-qwen)解析成 LiteLLM 标准字符串(dashscope/qwen-max)
+   # —— 通过 models.yaml 的 model_list 做 alias→litellm 字符串查表,**不**实例化 litellm.Router
+   model_str = alias_map.get(request_model, request_model)
    resp = await litellm.aresponses(
-     model=model,
+     model=model_str,
      input=full_input,
      **other_params,
    )
    # 不带 previous_response_id
 
-5. SessionRecorder (when store=true, default true)
-   id = "resp_" + uuid7()
-   session_id = parent_row.session_id if previous_response_id else uuid7()
-   parent_id = previous_response_id or None
-   ttl_at = now() + config.session.default_ttl
+6. (非流式) Override response id
+   resp["id"] = new_id
 
-   if size(serialize(input_json) + serialize(output_json)) > config.cold.threshold_bytes:
-     try:
-       cold_key = cold_storage.put({input, output})
-       INSERT (id, session_id, parent_id, model, provider,
-               input_json=null, output_json=null,
-               usage_json, cold_storage_key=cold_key,
-               created_at, ttl_at)
-     except ColdStorageWriteError:
-       # 降级:cold storage 写失败时存内联,确保不丢数据
-       log.warn("cold storage write failed, falling back to inline storage")
-       INSERT (..., input_json, output_json, usage_json, cold_storage_key=null)
+7. SessionRecorder
+   if store_flag (=请求里 store, 默认 true):
+     session_id = parent.session_id if previous_response_id else uuid7()
+     ttl_at = now() + config.session.default_ttl
+
+     if size(serialize(input_json) + serialize(output_json)) > config.cold.threshold_bytes:
+       try:
+         cold_key = cold_storage.put({input, output})
+         INSERT (id=new_id, session_id, parent_id=previous_response_id, model, provider,
+                 input_json=null, output_json=null,
+                 usage_json, cold_storage_key=cold_key, created_at, ttl_at)
+       except ColdStorageWriteError:
+         log.warn("cold storage write failed, falling back to inline")
+         INSERT (id=new_id, ..., cold_storage_key=null)
+     else:
+       INSERT (id=new_id, ..., input_json, output_json, usage_json, cold_storage_key=null)
    else:
-     INSERT (..., input_json, output_json, usage_json, cold_storage_key=null)
+     # store=false: id 仍生成并返回,但不写库
+     # 后续以此 id 作为 previous_response_id 必然 404 —— 符合 OpenAI "store=false 不可 retrieval" 语义
+     pass
 
-6. return resp with id (override LiteLLM 生成的 id)
+8. return resp (id 已在步骤 6 改写)
 ```
 
 ### 4.2 流式
 
-步骤 1-3 同非流式。
+步骤 1-4 同非流式(生成 new_id, validator, resolver)。
 
 ```
-4. async for event in litellm.aresponses(stream=True, ...):
-     # tee
+5. StreamBridge(rewrite_id=new_id)
+   async for event in bridge.tee(litellm.aresponses(stream=True, ...)):
+     # 改写以下 lifecycle 事件的 response.id → new_id:
+     #   response.created / response.in_progress
+     #   response.completed / response.failed / response.incomplete
+     # 这样客户端从 response.created 那一刻就看到最终 id,可以立刻保存用作下次 previous_response_id
      await client.send(event)
-     stream_builder.consume(event)
 
-5. (after stream end)
-   final_state = stream_builder.build()
-   SessionRecorder.persist(final_state)  # same logic as non-streaming step 5
+6. (after stream end)
+   final_state = bridge.final_state()
+   final_state["id"] = new_id
+   SessionRecorder.record(id=new_id, response_payload=final_state, ..., store_flag)
+   # 与非流式同样的 store_flag 处理
 ```
+
+### 4.3 跨 provider 链路 (v1 不支持)
+
+`previous_response_id` 是 v1 强一致只在**同 provider 同 model_group**内有效:
+
+- 父响应 provider != 当前请求 provider → **直接 409 `previous_response_provider_mismatch`**,不尝试转换
+- 理由:跨 provider 续聊涉及 tool_call_id 重映射、reasoning content 跨家归一化、token 重新计费基线,工作量翻倍且语义模糊
+- 上游 LiteLLM 自家也是这个策略(响应 id 编码 model_id 强制路由回同一 deployment)
+- 跨 provider continuity 留 v2(单独 issue),v1 backlog #0016 第一项目标改为"明确并验证 reject 流程清晰报错"
+
+### 4.4 store=false 语义
+
+- `store=false` → 网关仍生成 `new_id` 并返回给客户端(响应正常)
+- 但**不写 sessions 表**
+- 后续以 `new_id` 作为 `previous_response_id` 调 → 走 §4.1 step 4,`get_by_id(new_id)` 返回 None → **404 `previous_response_not_found`**
+- 这与 OpenAI "store=false → 响应不可 retrieval" 语义一致
+- Spec §6 配置默认 `default_store: true`(用户未传 store 时默认存储)
 
 `stream_builder` 累积:`output_text.delta`/`function_call_arguments.delta` 等增量事件 → 重建为完整 `output: OutputItem[]`,与非流式响应等价。
 
@@ -226,6 +281,9 @@ reject:
   fields:
     background: true
     truncation: "auto"
+  present_fields:                  # 这些字段只要出现就拒绝(不考虑值)
+    - conversation                 # OpenAI 新加的托管会话,与 previous_response_id 互斥
+    - context_management           # OpenAI 新加的上下文裁剪策略
   workaround_url_template: "https://github.com/SimonGino/responses-gateway/issues?q=is%3Aissue+{feature}"
 
 server:
@@ -244,7 +302,8 @@ server:
 
 | 情况 | HTTP | `error.type` |
 |---|---|---|
-| 特性不支持(reject 层) | 422 | `feature_not_supported` |
+| Tool / 字段不支持(reject 层) | 422 | `feature_not_supported` |
+| 出现 `conversation` 字段 | 422 | `conversation_not_supported`(子类型;message 显式提示与 `previous_response_id` 二选一) |
 | `previous_response_id` 不存在 | 404 | `previous_response_not_found` |
 | `previous_response_id` 已过期(TTL) | 410 | `previous_response_expired` |
 | 跨 provider 链断裂(parent.provider ≠ current.provider) | 409 | `previous_response_provider_mismatch` |
