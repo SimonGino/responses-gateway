@@ -61,3 +61,9 @@ select = ["E", "F", "I", "N", "B", "UP", "W", "ASYNC"]
 python_version = "3.11"
 strict = true
 plugins = ["pydantic.mypy"]
+
+# Optional/lazy imports without stubs — silence regardless of whether the package
+# is installed (CI's lint-typecheck job only installs the [dev] extra, not [s3]).
+[[tool.mypy.overrides]]
+module = ["aioboto3", "aioboto3.*"]
+ignore_missing_imports = true

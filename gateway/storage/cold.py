@@ -61,9 +61,8 @@ class S3ColdStorage:
         self._prefix = parts[1].rstrip("/") + "/" if len(parts) == 2 and parts[1] else ""
 
     async def put(self, payload: dict[str, Any]) -> str:
-        # `import-untyped` covers dev (aioboto3 installed but stubless),
-        # `import-not-found` covers CI lint-typecheck (s3 extra not installed).
-        import aioboto3  # type: ignore[import-untyped, import-not-found]
+        # aioboto3 is silenced via [[tool.mypy.overrides]] in pyproject.toml.
+        import aioboto3
 
         key = f"{self._prefix}{uuid.uuid4().hex}.json"
         try:
@@ -79,9 +78,7 @@ class S3ColdStorage:
             raise ColdStorageUnavailableError(f"S3 put failed: {exc}") from exc
 
     async def get(self, key: str) -> dict[str, Any]:
-        # mypy sees this import as untyped via the put-side ignore (same module);
-        # adding a second # type: ignore here triggers "Unused type: ignore".
-        import aioboto3
+        import aioboto3  # silenced via pyproject [[tool.mypy.overrides]]
 
         try:
             async with aioboto3.Session().client("s3") as s3:
