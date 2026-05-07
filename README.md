@@ -13,7 +13,7 @@ make docker-up                          # builds image + starts postgres + gatew
 make docker-logs                        # tail gateway logs
 ```
 
-Migrations run on container startup; the gateway's `storage.url` is overridden via the `GATEWAY_STORAGE__URL` env var so it always reaches the compose Postgres regardless of what `config.yaml` says. Service listens on `localhost:8080`.
+Migrations run on container startup; the gateway's `storage.url` is overridden via the `GATEWAY_STORAGE__URL` env var so it always reaches the compose Postgres regardless of what `config.yaml` says. Service is exposed on **`localhost:9090`** (mapped to 8080 inside the container).
 
 ### Option B — Host-side dev loop (faster reload)
 
