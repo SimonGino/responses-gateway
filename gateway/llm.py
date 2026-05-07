@@ -62,6 +62,10 @@ class LLMRouter:
         """Map alias → real LiteLLM model string. Pass-through if not aliased."""
         return self._alias_map.get(requested, requested)
 
+    def list_aliases(self) -> dict[str, str]:
+        """Public introspection for /v1/models — return a copy of the alias map."""
+        return dict(self._alias_map)
+
     async def call(self, *, request: dict[str, Any]) -> dict[str, Any]:
         try:
             return cast(

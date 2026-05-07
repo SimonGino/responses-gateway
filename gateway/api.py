@@ -87,6 +87,27 @@ def build_app(config: GatewayConfig) -> FastAPI:
     async def healthz() -> dict[str, str]:
         return {"status": "ok"}
 
+    @app.get("/v1/models")
+    async def list_models() -> dict[str, Any]:
+        """OpenAI-compatible models list. Returns alias names from models.yaml.
+
+        Many clients (Cursor / Codex / ChatGPT Apps) probe this endpoint on
+        startup to discover available models. Returns 200 with empty data[]
+        if no aliases are configured rather than 404.
+        """
+        aliases = llm.list_aliases()
+        return {
+            "object": "list",
+            "data": [
+                {
+                    "id": name,
+                    "object": "model",
+                    "owned_by": provider_from_model(litellm_str),
+                }
+                for name, litellm_str in aliases.items()
+            ],
+        }
+
     @app.get("/__test/raise-feature-not-supported")
     async def _raise_fns() -> None:  # pragma: no cover
         raise FeatureNotSupportedError(
