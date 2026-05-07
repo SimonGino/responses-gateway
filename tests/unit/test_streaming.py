@@ -163,6 +163,45 @@ async def test_bridge_synthesizes_output_item_added_when_text_delta_for_unknown_
     assert synth_part_added["part"]["type"] == "output_text"
 
 
+async def test_bridge_synthesizes_parent_item_when_content_part_added_arrives_first() -> None:
+    """If a provider emits ``response.content_part.added`` for an unannounced
+    item, the parent ``response.output_item.added`` must be synthesized first
+    (otherwise strict clients see a content part referencing an unknown item)."""
+    events = [
+        _evt("response.created", response={"id": "resp_x", "output": []}),
+        _evt(
+            "response.content_part.added",
+            item_id="msg_orphan",
+            output_index=0,
+            content_index=0,
+            part={"type": "output_text", "text": ""},
+        ),
+        _evt(
+            "response.output_text.delta",
+            item_id="msg_orphan",
+            output_index=0,
+            content_index=0,
+            delta="hi",
+        ),
+    ]
+
+    async def src() -> Any:
+        for e in events:
+            yield e
+
+    bridge = StreamBridge()
+    forwarded = [evt async for evt in bridge.tee(src())]
+
+    types = [e["type"] for e in forwarded]
+    item_added_idx = types.index("response.output_item.added")
+    part_added_idx = types.index("response.content_part.added")
+    # Parent item announcement must precede the (forwarded) content_part.added.
+    assert item_added_idx < part_added_idx
+    # And we must NOT double-synthesize a second content_part.added (provider
+    # already sent one — only the parent item was missing).
+    assert types.count("response.content_part.added") == 1
+
+
 async def test_bridge_does_not_synthesize_when_added_already_present() -> None:
     """Well-formed streams (with explicit added events) must pass through unchanged."""
     events = [

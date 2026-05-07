@@ -85,8 +85,10 @@ class StreamBridge:
             if iid:
                 cidx = int(event.get("content_index", 0))
                 self._announced_parts.add((iid, cidx))
-            return []
-        if etype not in _MESSAGE_EVENT_TYPES:
+            # Fall through: if the provider sent content_part.added without
+            # first sending output_item.added for the parent, the parent
+            # synthesis below still needs to fire.
+        elif etype not in _MESSAGE_EVENT_TYPES:
             return []
         item_id = event.get("item_id")
         if not isinstance(item_id, str):
