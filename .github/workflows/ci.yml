@@ -13,10 +13,12 @@ jobs:
       - uses: astral-sh/setup-uv@v3
         with:
           enable-cache: true
-      - run: uv pip install --system -e ".[dev]"
-      - run: ruff check gateway/ tests/
-      - run: ruff format --check gateway/ tests/
-      - run: mypy gateway/
+      - name: Install Python (uv-managed)
+        run: uv python install 3.12
+      - run: uv sync --python 3.12 --extra dev --frozen
+      - run: uv run ruff check gateway/ tests/
+      - run: uv run ruff format --check gateway/ tests/
+      - run: uv run mypy gateway/
 
   test:
     runs-on: ubuntu-latest
@@ -39,16 +41,17 @@ jobs:
           --health-retries 5
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
       - uses: astral-sh/setup-uv@v3
-      - run: uv pip install --system -e ".[dev,postgres]"
+        with:
+          enable-cache: true
+      - name: Install Python (uv-managed)
+        run: uv python install ${{ matrix.python-version }}
+      - run: uv sync --python ${{ matrix.python-version }} --extra dev --extra postgres --frozen
       - name: Run unit + integration tests
         env:
           GATEWAY_TEST_STORAGE: ${{ matrix.storage }}
           GATEWAY_TEST_POSTGRES_URL: postgresql+asyncpg://gateway:gateway@localhost:5432/gateway_test
-        run: pytest tests/unit/ tests/integration/ -v --cov=gateway --cov-report=xml
+        run: uv run pytest tests/unit/ tests/integration/ -v --cov=gateway --cov-report=xml
       - uses: codecov/codecov-action@v4
         if: matrix.python-version == '3.12' && matrix.storage == 'postgres'
         with:
