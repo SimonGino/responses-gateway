@@ -100,6 +100,104 @@ async def test_bridge_handles_function_call_arguments_delta() -> None:
     assert fc_items[0]["arguments"] == '{"q":"hi"}'
 
 
+async def test_bridge_synthesizes_output_item_added_when_text_delta_for_unknown_message() -> None:
+    """If LiteLLM omits ``response.output_item.added`` for a message but starts
+    streaming ``response.output_text.delta``, the bridge synthesizes the missing
+    announcement so strict clients (Cherry Studio) don't raise
+    ``text part <id> not found``."""
+    events = [
+        _evt("response.created", response={"id": "resp_x", "output": []}),
+        _evt(
+            "response.output_text.delta",
+            item_id="msg_unknown",
+            output_index=0,
+            content_index=0,
+            delta="hi",
+        ),
+        _evt(
+            "response.output_text.done",
+            item_id="msg_unknown",
+            output_index=0,
+            content_index=0,
+            text="hi",
+        ),
+        _evt(
+            "response.output_item.done",
+            output_index=0,
+            item={
+                "id": "msg_unknown",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "hi"}],
+            },
+        ),
+        _evt("response.completed", response={"id": "resp_x", "output": [], "usage": {}}),
+    ]
+
+    async def src() -> Any:
+        for e in events:
+            yield e
+
+    bridge = StreamBridge()
+    forwarded = [evt async for evt in bridge.tee(src())]
+
+    types = [e["type"] for e in forwarded]
+    # Synthesized item.added must appear before the delta
+    delta_idx = types.index("response.output_text.delta")
+    item_added_idx = types.index("response.output_item.added")
+    part_added_idx = types.index("response.content_part.added")
+    assert item_added_idx < delta_idx
+    assert part_added_idx < delta_idx
+    assert item_added_idx < part_added_idx
+
+    synth_item_added = forwarded[item_added_idx]
+    assert synth_item_added["item"]["id"] == "msg_unknown"
+    assert synth_item_added["item"]["type"] == "message"
+    assert synth_item_added["item"]["role"] == "assistant"
+    assert synth_item_added["item"]["status"] == "in_progress"
+
+    synth_part_added = forwarded[part_added_idx]
+    assert synth_part_added["item_id"] == "msg_unknown"
+    assert synth_part_added["content_index"] == 0
+    assert synth_part_added["part"]["type"] == "output_text"
+
+
+async def test_bridge_does_not_synthesize_when_added_already_present() -> None:
+    """Well-formed streams (with explicit added events) must pass through unchanged."""
+    events = [
+        _evt("response.created", response={"id": "resp_x", "output": []}),
+        _evt(
+            "response.output_item.added",
+            output_index=0,
+            item={"id": "msg_1", "type": "message", "role": "assistant", "status": "in_progress"},
+        ),
+        _evt(
+            "response.content_part.added",
+            item_id="msg_1",
+            output_index=0,
+            content_index=0,
+            part={"type": "output_text", "text": ""},
+        ),
+        _evt(
+            "response.output_text.delta",
+            item_id="msg_1",
+            output_index=0,
+            content_index=0,
+            delta="hi",
+        ),
+    ]
+
+    async def src() -> Any:
+        for e in events:
+            yield e
+
+    bridge = StreamBridge()
+    forwarded = [evt async for evt in bridge.tee(src())]
+
+    assert forwarded == events  # identity — no synthesis
+
+
 async def test_bridge_rewrites_id_in_lifecycle_events() -> None:
     """When constructed with rewrite_id, lifecycle events' response.id must be replaced."""
     events = [

@@ -25,6 +25,23 @@ _LIFECYCLE_EVENT_TYPES: frozenset[str] = frozenset(
     }
 )
 
+# Per-item events that imply a message item — if we see one before its
+# `response.output_item.added`, synthesize the missing announcement.
+_MESSAGE_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        "response.output_text.delta",
+        "response.output_text.done",
+        "response.refusal.delta",
+        "response.refusal.done",
+        "response.content_part.added",
+        "response.content_part.done",
+    }
+)
+# Subset where a content_part.added is also expected before the event.
+_TEXT_PART_EVENT_TYPES: frozenset[str] = frozenset(
+    {"response.output_text.delta", "response.output_text.done"}
+)
+
 
 class StreamBridge:
     def __init__(self, *, rewrite_id: str | None = None) -> None:
@@ -32,17 +49,86 @@ class StreamBridge:
         self._items_by_id: dict[str, dict[str, Any]] = {}
         self._item_order: list[str] = []
         self._final_response: dict[str, Any] = {"output": [], "usage": {}}
+        self._announced_items: set[str] = set()
+        self._announced_parts: set[tuple[str, int]] = set()
 
     async def tee(self, source: AsyncIterator[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
         """Forward each event downstream while updating the internal final-state buffer.
 
         Lifecycle events get their `response.id` rewritten to `self._rewrite_id`
         before being forwarded (and before being consumed into final state).
+
+        Defensive normalization: some upstream providers (observed: GLM via
+        LiteLLM) start `response.output_text.delta` without first emitting
+        `response.output_item.added` / `response.content_part.added`. Strict
+        clients (e.g. Cherry Studio) reject the stream with `text part <id> not
+        found`. We synthesize the missing announcements so the protocol surface
+        stays well-formed.
         """
         async for event in source:
             self._maybe_rewrite_id(event)
+            for synthetic in self._synthesize_missing_announcements(event):
+                self._consume(synthetic)
+                yield synthetic
             self._consume(event)
             yield event
+
+    def _synthesize_missing_announcements(
+        self, event: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        etype = event.get("type")
+        if etype == "response.output_item.added":
+            iid = event.get("item", {}).get("id")
+            if iid:
+                self._announced_items.add(iid)
+            return []
+        if etype == "response.content_part.added":
+            iid = event.get("item_id")
+            if iid:
+                cidx = int(event.get("content_index", 0))
+                self._announced_parts.add((iid, cidx))
+            return []
+        if etype not in _MESSAGE_EVENT_TYPES:
+            return []
+        item_id = event.get("item_id")
+        if not isinstance(item_id, str):
+            return []
+        synth: list[dict[str, Any]] = []
+        output_index = event.get("output_index", 0)
+        if item_id not in self._announced_items:
+            synth.append(
+                {
+                    "type": "response.output_item.added",
+                    "output_index": output_index,
+                    "item": {
+                        "id": item_id,
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "in_progress",
+                        "content": [],
+                    },
+                }
+            )
+            self._announced_items.add(item_id)
+        if etype in _TEXT_PART_EVENT_TYPES:
+            cidx = int(event.get("content_index", 0))
+            key = (item_id, cidx)
+            if key not in self._announced_parts:
+                synth.append(
+                    {
+                        "type": "response.content_part.added",
+                        "item_id": item_id,
+                        "output_index": output_index,
+                        "content_index": cidx,
+                        "part": {
+                            "type": "output_text",
+                            "text": "",
+                            "annotations": [],
+                        },
+                    }
+                )
+                self._announced_parts.add(key)
+        return synth
 
     def _maybe_rewrite_id(self, event: dict[str, Any]) -> None:
         if not self._rewrite_id:
