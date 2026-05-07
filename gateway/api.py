@@ -200,6 +200,8 @@ def build_app(config: GatewayConfig) -> FastAPI:
                     response_id=new_id,
                     error_type=exc.error_type,
                     status_code=exc.status_code,
+                    message=exc.message,
+                    details=getattr(exc, "details", None),
                 )
                 error_body = exc.to_response_body()["error"]
                 failed_event = {
