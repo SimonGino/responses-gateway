@@ -122,6 +122,29 @@ async def test_alias_credentials_override_request_supplied_credentials() -> None
     assert m.await_args.kwargs["api_key"] == "server-side-key"
 
 
+async def test_router_call_coerces_pydantic_response_to_dict() -> None:
+    """Non-streaming path: newer litellm returns a Pydantic ``ResponsesAPIResponse``
+    rather than a dict. Downstream code (api.create_response) does
+    ``response['id'] = ...`` so the wrapper must coerce."""
+    from dataclasses import dataclass, field
+
+    @dataclass
+    class FakeResp:
+        id: str = "resp_litellm"
+        output: list[Any] = field(default_factory=list)
+        usage: dict[str, Any] = field(default_factory=dict)
+
+        def model_dump(self, exclude_none: bool = False) -> dict[str, Any]:
+            return {"id": self.id, "output": self.output, "usage": self.usage}
+
+    router = LLMRouter(LiteLLMConfig())
+    with patch("gateway.llm.litellm.aresponses", new=AsyncMock(return_value=FakeResp())):
+        result = await router.call(request={"input": "hi", "model": "deepseek/x"})
+    assert isinstance(result, dict)
+    result["id"] = "resp_gateway"  # must be mutable like a dict
+    assert result["id"] == "resp_gateway"
+
+
 async def test_router_stream_coerces_pydantic_events_to_dicts() -> None:
     """LiteLLM yields Pydantic ResponseCreatedEvent etc. on streaming; the gateway
     must convert them to dicts so the SSE JSON encoder + StreamBridge can use them."""
