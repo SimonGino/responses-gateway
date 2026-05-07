@@ -31,5 +31,9 @@ class SessionRow(Base):
     output_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     usage_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     cold_storage_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, index=True, nullable=False)
-    ttl_at: Mapped[datetime | None] = mapped_column(DateTime, index=True, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), index=True, nullable=False
+    )
+    ttl_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True, nullable=True
+    )

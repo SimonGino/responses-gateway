@@ -31,8 +31,8 @@ def upgrade() -> None:
     sa.Column('output_json', sa.JSON(), nullable=True),
     sa.Column('usage_json', sa.JSON(), nullable=True),
     sa.Column('cold_storage_key', sa.String(length=512), nullable=True),
-    sa.Column('created_at', sa.DateTime(), nullable=False),
-    sa.Column('ttl_at', sa.DateTime(), nullable=True),
+    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('ttl_at', sa.DateTime(timezone=True), nullable=True),
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index(op.f('ix_sessions_created_at'), 'sessions', ['created_at'], unique=False)
