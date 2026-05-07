@@ -1,7 +1,8 @@
 """Thin wrapper around `litellm.aresponses`. The only LLM dependency in the gateway.
 
-Reads a LiteLLM-format `model_list` YAML purely as an alias map: a request
-asking for `default-qwen` will route to `dashscope/qwen-max` (etc.). Does NOT
+Reads a LiteLLM-format `model_list` YAML as a per-alias `litellm_params` map.
+A request asking for `glm-5.1` resolves to the alias entry's *full* params
+(model string + api_base + api_key + any other litellm_params field). Does NOT
 instantiate `litellm.Router` — fallback chains, load balancing, cooldowns,
 virtual keys are out of scope for v1. Multi-deployment routing is delegated
 to whatever load balancer sits in front of the gateway.
@@ -27,11 +28,14 @@ def provider_from_model(model: str) -> str:
     return model.split("/", 1)[0]
 
 
-def _load_alias_map(model_list_path: str | None) -> dict[str, str]:
-    """Build {request_name: litellm_string} from a LiteLLM model_list yaml.
+def _load_alias_map(model_list_path: str | None) -> dict[str, dict[str, Any]]:
+    """Build {request_name: litellm_params_dict} from a LiteLLM model_list yaml.
 
-    Each entry's `model_name` is the alias clients use; its `litellm_params.model`
-    is the actual LiteLLM-recognized provider/model string.
+    Each entry's `model_name` is the alias clients use. The full
+    `litellm_params` dict is preserved — including `api_base`, `api_key`,
+    `extra_body`, etc. — and spread as kwargs into `litellm.aresponses` at
+    call time. Without this, alias-time credentials would be lost and
+    LiteLLM would fall back to env-var auth (or no auth at all).
     """
     if not model_list_path:
         return {}
@@ -41,15 +45,14 @@ def _load_alias_map(model_list_path: str | None) -> dict[str, str]:
     with p.open() as f:
         cfg = yaml.safe_load(f) or {}
     entries = cfg.get("model_list") or []
-    aliases: dict[str, str] = {}
+    aliases: dict[str, dict[str, Any]] = {}
     for entry in entries:
         if not isinstance(entry, dict):
             continue
         name = entry.get("model_name")
         params = entry.get("litellm_params") or {}
-        litellm_model = params.get("model") if isinstance(params, dict) else None
-        if name and litellm_model:
-            aliases[str(name)] = str(litellm_model)
+        if name and isinstance(params, dict) and params.get("model"):
+            aliases[str(name)] = dict(params)
     return aliases
 
 
@@ -59,19 +62,36 @@ class LLMRouter:
         self._alias_map = _load_alias_map(config.model_list_path)
 
     def resolve_model(self, requested: str) -> str:
-        """Map alias → real LiteLLM model string. Pass-through if not aliased."""
-        return self._alias_map.get(requested, requested)
+        """Return the litellm model string for an alias, else the input unchanged."""
+        params = self._alias_map.get(requested)
+        if params is None:
+            return requested
+        return str(params.get("model", requested))
 
     def list_aliases(self) -> dict[str, str]:
-        """Public introspection for /v1/models — return a copy of the alias map."""
-        return dict(self._alias_map)
+        """Public introspection for /v1/models — return alias_name → model_string."""
+        return {name: str(p.get("model", "")) for name, p in self._alias_map.items()}
+
+    def _resolve_request(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Apply alias resolution: replace model and merge api_base/api_key/etc.
+
+        The alias's `litellm_params` win over request fields on overlap. This
+        means a server-configured `api_key` cannot be overridden by a client-
+        supplied one — important so an unauthenticated downstream client can't
+        inject its own credentials onto the gateway's outbound call.
+        """
+        requested = request.get("model", "")
+        params = self._alias_map.get(requested)
+        if params is None:
+            return request
+        return {**request, **params}
 
     async def call(self, *, request: dict[str, Any]) -> dict[str, Any]:
         try:
             return cast(
                 dict[str, Any],
                 await litellm.aresponses(
-                    **{**request, "model": self.resolve_model(request.get("model", ""))},
+                    **self._resolve_request(request),
                     timeout=self._cfg.request_timeout,
                     num_retries=self._cfg.num_retries,
                 ),
@@ -86,7 +106,7 @@ class LLMRouter:
             # the spread would produce a "multiple values for keyword argument" error.
             request_without_stream = {k: v for k, v in request.items() if k != "stream"}
             iterator = await litellm.aresponses(
-                **{**request_without_stream, "model": self.resolve_model(request.get("model", ""))},
+                **self._resolve_request(request_without_stream),
                 stream=True,
                 timeout=self._cfg.request_timeout,
                 num_retries=self._cfg.num_retries,

@@ -75,7 +75,72 @@ async def test_router_uses_resolved_model_when_calling_litellm() -> None:
     fake_response = {"id": "resp_x", "output": [], "usage": {}}
     cfg = LiteLLMConfig()
     router = LLMRouter(cfg)
-    router._alias_map = {"my-alias": "deepseek/deepseek-chat"}
+    router._alias_map = {"my-alias": {"model": "deepseek/deepseek-chat"}}
     with patch("gateway.llm.litellm.aresponses", new=AsyncMock(return_value=fake_response)) as m:
         await router.call(request={"input": "hi", "model": "my-alias"})
     assert m.await_args.kwargs["model"] == "deepseek/deepseek-chat"
+
+
+async def test_router_propagates_alias_credentials_to_litellm() -> None:
+    """Alias's litellm_params (api_base, api_key, ...) must be forwarded to LiteLLM,
+    or downstream calls hit the wrong endpoint with no credentials."""
+    fake_response = {"id": "resp_x", "output": [], "usage": {}}
+    cfg = LiteLLMConfig()
+    router = LLMRouter(cfg)
+    router._alias_map = {
+        "glm-5.1": {
+            "model": "openai/glm-5.1",
+            "api_base": "https://open.bigmodel.cn/api/paas/v4",
+            "api_key": "zhipu-test-key",
+        }
+    }
+    with patch("gateway.llm.litellm.aresponses", new=AsyncMock(return_value=fake_response)) as m:
+        await router.call(request={"input": "hi", "model": "glm-5.1"})
+    kwargs = m.await_args.kwargs
+    assert kwargs["model"] == "openai/glm-5.1"
+    assert kwargs["api_base"] == "https://open.bigmodel.cn/api/paas/v4"
+    assert kwargs["api_key"] == "zhipu-test-key"
+
+
+async def test_alias_credentials_override_request_supplied_credentials() -> None:
+    """Server-configured api_key must win over a client-supplied one (security:
+    don't let unauthenticated clients inject their own credentials)."""
+    fake_response = {"id": "resp_x", "output": [], "usage": {}}
+    cfg = LiteLLMConfig()
+    router = LLMRouter(cfg)
+    router._alias_map = {
+        "glm-5.1": {
+            "model": "openai/glm-5.1",
+            "api_key": "server-side-key",
+        }
+    }
+    with patch("gateway.llm.litellm.aresponses", new=AsyncMock(return_value=fake_response)) as m:
+        await router.call(
+            request={"input": "hi", "model": "glm-5.1", "api_key": "attacker-supplied"}
+        )
+    assert m.await_args.kwargs["api_key"] == "server-side-key"
+
+
+def test_load_alias_map_preserves_full_litellm_params(tmp_path: Path) -> None:
+    """Loader must capture api_base / api_key, not just the model string."""
+    models_yaml = tmp_path / "models.yaml"
+    models_yaml.write_text(
+        """
+model_list:
+  - model_name: glm-5.1
+    litellm_params:
+      model: openai/glm-5.1
+      api_base: https://open.bigmodel.cn/api/paas/v4
+      api_key: zhipu-test-key
+      extra_body:
+        thinking:
+          type: enabled
+"""
+    )
+    cfg = LiteLLMConfig(model_list_path=str(models_yaml))
+    router = LLMRouter(cfg)
+    params = router._alias_map["glm-5.1"]
+    assert params["model"] == "openai/glm-5.1"
+    assert params["api_base"] == "https://open.bigmodel.cn/api/paas/v4"
+    assert params["api_key"] == "zhipu-test-key"
+    assert params["extra_body"] == {"thinking": {"type": "enabled"}}
