@@ -57,13 +57,17 @@ class Validator:
         strip_mode = self._cfg.mode == "strip"
         stripped: list[tuple[str, str]] = []
 
-        # Tools — iterate in reverse so we can pop without disturbing indices we
-        # haven't visited yet (and emitted param strings still match the input order).
+        # Tools.
         tools = request.get("tools") or []
         if isinstance(tools, list):
+            allow_list_active = strip_mode and bool(self._cfg.strip_mode_allowed_tool_types)
+            allow_set: set[str] = (
+                set(self._cfg.strip_mode_allowed_tool_types) if allow_list_active else set()
+            )
             indices_to_drop: list[int] = []
             for i, tool in enumerate(tools):
                 ttype = tool.get("type") if isinstance(tool, dict) else None
+                # Explicit deny list (e.g. web_search): always applies.
                 if ttype in self._rejected_tool_types:
                     if strip_mode:
                         stripped.append((str(ttype), f"tools[{i}].type"))
@@ -75,6 +79,14 @@ class Validator:
                             provider=provider,
                             workaround_url=self._workaround_url(str(ttype)),
                         )
+                    continue
+                # Strip-mode allow list: drop anything not in the allow set.
+                # E.g. Codex sends `namespace` tools; chat/completions providers
+                # 400 on unknown types. Reject mode does NOT apply this — it's a
+                # safety net specifically for non-cooperative clients.
+                if allow_list_active and isinstance(ttype, str) and ttype not in allow_set:
+                    stripped.append((ttype, f"tools[{i}].type"))
+                    indices_to_drop.append(i)
             for i in reversed(indices_to_drop):
                 tools.pop(i)
             if not tools and "tools" in request:

@@ -167,3 +167,65 @@ def test_default_mode_is_reject() -> None:
     v = Validator(cfg)
     with pytest.raises(FeatureNotSupportedError):
         v.validate({"input": "hi", "tools": [{"type": "web_search"}]})
+
+
+def test_strip_mode_drops_non_function_tool_types(strip_validator: Validator) -> None:
+    """Default allow-list is ['function']; namespace/custom types must be stripped
+    even though they aren't in the explicit deny list."""
+    request = {
+        "input": "hi",
+        "tools": [
+            {"type": "function", "name": "f"},
+            {"type": "namespace", "name": "Codex_Namespace_1"},  # ← Codex-specific
+            {"type": "function", "name": "g"},
+            {"type": "namespace", "name": "Codex_Namespace_2"},
+        ],
+    }
+    stripped = strip_validator.validate(request)
+    assert {f for f, _ in stripped} == {"namespace"}
+    assert all(t.get("type") == "function" for t in request["tools"])
+
+
+def test_strip_mode_allow_list_can_be_extended() -> None:
+    """User can add 'mcp' or other types to the allow list via config."""
+    cfg = RejectConfig(mode="strip", strip_mode_allowed_tool_types=["function", "mcp"])
+    v = Validator(cfg)
+    request = {
+        "input": "hi",
+        "tools": [
+            {"type": "function"},
+            {"type": "mcp"},
+            {"type": "namespace"},
+        ],
+    }
+    v.validate(request)
+    surviving = [t["type"] for t in request["tools"]]
+    assert surviving == ["function", "mcp"]
+
+
+def test_strip_mode_with_empty_allow_list_skips_unknown_filter() -> None:
+    """Setting allow list to [] disables allow-list filtering — only the explicit
+    deny list applies."""
+    cfg = RejectConfig(mode="strip", strip_mode_allowed_tool_types=[])
+    v = Validator(cfg)
+    request = {
+        "input": "hi",
+        "tools": [
+            {"type": "function"},
+            {"type": "namespace"},  # not in deny list, allow list disabled → kept
+        ],
+    }
+    v.validate(request)
+    surviving = [t["type"] for t in request["tools"]]
+    assert surviving == ["function", "namespace"]
+
+
+def test_reject_mode_does_not_apply_allow_list() -> None:
+    """The allow-list filter is strip-mode only — reject mode lets non-deny-listed
+    tool types through (even unusual ones), preserving the spec contract that
+    reject mode only rejects items explicitly in the deny config."""
+    cfg = RejectConfig(mode="reject", strip_mode_allowed_tool_types=["function"])
+    v = Validator(cfg)
+    # `namespace` is not in the deny list and we're in reject mode, so it should
+    # pass through (not raise).
+    v.validate({"input": "hi", "tools": [{"type": "namespace"}]})
