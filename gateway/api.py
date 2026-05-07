@@ -129,7 +129,7 @@ def build_app(config: GatewayConfig) -> FastAPI:
 
         provider = provider_from_model(payload.get("model", ""))
         try:
-            validator.validate(payload, provider=provider)
+            stripped = validator.validate(payload, provider=provider)
         except FeatureNotSupportedError as exc:
             _log.warn(
                 "responses_request_rejected",
@@ -139,6 +139,13 @@ def build_app(config: GatewayConfig) -> FastAPI:
                 param=exc.param,
             )
             raise
+        if stripped:
+            _log.warn(
+                "responses_request_features_stripped",
+                request_id=rid,
+                model=payload.get("model"),
+                stripped=stripped,
+            )
 
         store_flag = payload.pop("store", config.session.default_store)
         streaming = bool(payload.get("stream", False))

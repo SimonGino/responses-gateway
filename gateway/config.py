@@ -55,6 +55,14 @@ class RejectConfig(BaseModel):
     workaround_url_template: str = (
         "https://github.com/SimonGino/responses-gateway/issues?q=is%3Aissue+{feature}"
     )
+    # Behavior when an unsupported feature is detected:
+    #   "reject" → return 422 (default; explicit failure for honest clients)
+    #   "strip"  → silently drop the offending tools/fields, log a warning,
+    #              and add `X-Stripped-Features` to the response header
+    # Strip mode exists for non-cooperative clients (Codex / Cursor) that
+    # always send a fixed toolset including `web_search`. It still surfaces
+    # the issue (log + header) so it isn't a true silent-fail.
+    mode: str = "reject"
 
 
 class ServerConfig(BaseModel):

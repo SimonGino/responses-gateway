@@ -91,3 +91,79 @@ def test_rejects_context_management_presence(validator: Validator) -> None:
 def test_allows_request_without_present_fields(validator: Validator) -> None:
     # Plain request should not trip presence rejection
     validator.validate({"input": "hi", "model": "deepseek/deepseek-chat"})
+
+
+# ---------- Strip mode (mode="strip") ----------
+
+
+@pytest.fixture
+def strip_validator() -> Validator:
+    return Validator(RejectConfig(mode="strip"))
+
+
+def test_strip_mode_drops_unsupported_tool_in_place(strip_validator: Validator) -> None:
+    request = {
+        "input": "hi",
+        "tools": [
+            {"type": "function", "name": "f"},
+            {"type": "web_search"},
+            {"type": "function", "name": "g"},
+        ],
+    }
+    stripped = strip_validator.validate(request)
+    assert stripped == [("web_search", "tools[1].type")]
+    # Surviving tools preserve original order; web_search is gone.
+    assert [t.get("type") or t.get("name") for t in request["tools"]] == ["function", "function"]
+
+
+def test_strip_mode_drops_multiple_unsupported_tools(strip_validator: Validator) -> None:
+    request = {
+        "input": "hi",
+        "tools": [
+            {"type": "web_search"},
+            {"type": "function", "name": "f"},
+            {"type": "code_interpreter"},
+            {"type": "function", "name": "g"},
+            {"type": "computer_use_preview"},
+        ],
+    }
+    stripped = strip_validator.validate(request)
+    assert {f for f, _ in stripped} == {"web_search", "code_interpreter", "computer_use_preview"}
+    assert all(t.get("type") == "function" for t in request["tools"])
+
+
+def test_strip_mode_drops_offending_field(strip_validator: Validator) -> None:
+    request = {"input": "hi", "background": True}
+    stripped = strip_validator.validate(request)
+    assert stripped == [("background", "background")]
+    assert "background" not in request
+
+
+def test_strip_mode_drops_present_only_field(strip_validator: Validator) -> None:
+    request = {"input": "hi", "conversation": "conv_xxx"}
+    stripped = strip_validator.validate(request)
+    assert stripped == [("conversation", "conversation")]
+    assert "conversation" not in request
+
+
+def test_strip_mode_returns_empty_list_when_request_clean(strip_validator: Validator) -> None:
+    request = {"input": "hi", "model": "deepseek/deepseek-chat"}
+    stripped = strip_validator.validate(request)
+    assert stripped == []
+
+
+def test_strip_mode_removes_tools_key_when_all_dropped(strip_validator: Validator) -> None:
+    """If stripping empties the tools list, drop the key entirely — some
+    providers reject explicit empty tool arrays."""
+    request = {"input": "hi", "tools": [{"type": "web_search"}]}
+    strip_validator.validate(request)
+    assert "tools" not in request
+
+
+def test_default_mode_is_reject() -> None:
+    """Default config should still raise (preserves backwards-compat for v1 spec)."""
+    cfg = RejectConfig()
+    assert cfg.mode == "reject"
+    v = Validator(cfg)
+    with pytest.raises(FeatureNotSupportedError):
+        v.validate({"input": "hi", "tools": [{"type": "web_search"}]})
