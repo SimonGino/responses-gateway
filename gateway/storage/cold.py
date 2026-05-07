@@ -77,7 +77,9 @@ class S3ColdStorage:
             raise ColdStorageUnavailableError(f"S3 put failed: {exc}") from exc
 
     async def get(self, key: str) -> dict[str, Any]:
-        import aioboto3  # type: ignore[import-untyped]
+        # mypy sees this import as untyped via the put-side ignore (same module);
+        # adding a second # type: ignore here triggers "Unused type: ignore".
+        import aioboto3
 
         try:
             async with aioboto3.Session().client("s3") as s3:
