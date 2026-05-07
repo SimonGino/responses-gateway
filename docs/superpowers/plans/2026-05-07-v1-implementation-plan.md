@@ -313,8 +313,9 @@ jobs:
       - uses: astral-sh/setup-uv@v3
         with:
           enable-cache: true
-          python-version: "3.12"
-      - run: uv sync --extra dev --frozen
+      - name: Install Python (uv-managed)
+        run: uv python install 3.12
+      - run: uv sync --python 3.12 --extra dev --frozen
       - run: uv run ruff check gateway/ tests/
       - run: uv run ruff format --check gateway/ tests/
       - run: uv run mypy gateway/
@@ -343,8 +344,9 @@ jobs:
       - uses: astral-sh/setup-uv@v3
         with:
           enable-cache: true
-          python-version: ${{ matrix.python-version }}
-      - run: uv sync --extra dev --extra postgres --frozen
+      - name: Install Python (uv-managed)
+        run: uv python install ${{ matrix.python-version }}
+      - run: uv sync --python ${{ matrix.python-version }} --extra dev --extra postgres --frozen
       - name: Run unit + integration tests
         env:
           GATEWAY_TEST_STORAGE: ${{ matrix.storage }}
@@ -356,7 +358,7 @@ jobs:
           files: ./coverage.xml
 ```
 
-> Note: uses `uv sync --frozen` so installs are reproducible from `uv.lock`. `uv run <cmd>` then executes inside the synced venv. Python is pinned via `setup-uv@v3 with python-version` (consistent across both jobs). A placeholder smoke test (`tests/unit/test_smoke.py`) is created in Task 1 to ensure pytest finds at least one test before real test files land.
+> Note: uses `uv sync --frozen` so installs are reproducible from `uv.lock`. `uv run <cmd>` then executes inside the synced venv. Python is uv-managed (via `uv python install`) — passing `python-version` to `setup-uv@v3` directly causes uv to use Ubuntu's externally-managed system Python (PEP 668 error). A placeholder smoke test (`tests/unit/test_smoke.py`) is created in Task 1 to ensure pytest finds at least one test before real test files land.
 
 - [ ] **Step 2.2: Verify YAML syntax**
 
