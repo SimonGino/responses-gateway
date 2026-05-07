@@ -61,7 +61,9 @@ class S3ColdStorage:
         self._prefix = parts[1].rstrip("/") + "/" if len(parts) == 2 and parts[1] else ""
 
     async def put(self, payload: dict[str, Any]) -> str:
-        import aioboto3  # type: ignore[import-untyped]
+        # `import-untyped` covers dev (aioboto3 installed but stubless),
+        # `import-not-found` covers CI lint-typecheck (s3 extra not installed).
+        import aioboto3  # type: ignore[import-untyped, import-not-found]
 
         key = f"{self._prefix}{uuid.uuid4().hex}.json"
         try:
