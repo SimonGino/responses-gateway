@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from gateway.errors import (
+    ColdStorageUnavailableError,
     PreviousResponseExpiredError,
     PreviousResponseNotFoundError,
     PreviousResponseProviderMismatchError,
@@ -22,6 +23,14 @@ class FakeStore:
 
     async def get_by_id(self, response_id: str) -> SessionRecord | None:
         return self._by_id.get(response_id)
+
+
+class FakeCold:
+    def __init__(self, payloads: dict[str, dict[str, Any]]) -> None:
+        self._payloads = payloads
+
+    async def get(self, key: str) -> dict[str, Any]:
+        return self._payloads[key]
 
 
 def _row(
@@ -190,3 +199,66 @@ async def test_old_instructions_dropped_from_history() -> None:
     new_input_str = str(resolved.request["input"])
     assert "old system prompt" not in new_input_str
     assert "hello" in new_input_str
+
+
+# ---------- Cold storage path ----------
+
+
+async def test_cold_storage_payload_retrieved_when_key_set() -> None:
+    """When a row's input/output is offloaded to cold storage, _payload reads it."""
+    cold_key = "cold-abc"
+    cold_payload = {
+        "input": {"input": [{"role": "user", "content": "from cold"}]},
+        "output": {
+            "output": [
+                {"type": "message", "content": [{"type": "output_text", "text": "from cold"}]}
+            ]
+        },
+    }
+    row = SessionRecord(
+        id="r1",
+        session_id="s1",
+        parent_id=None,
+        model="deepseek-chat",
+        provider="deepseek",
+        input_json=None,  # offloaded
+        output_json=None,  # offloaded
+        usage_json=None,
+        cold_storage_key=cold_key,
+        created_at=datetime.now(UTC),
+        ttl_at=None,
+    )
+    resolver = SessionResolver(
+        store=FakeStore([row]), cold_storage=FakeCold({cold_key: cold_payload})
+    )
+    resolved = await resolver.resolve(
+        {"input": "follow-up", "model": "deepseek-chat", "previous_response_id": "r1"},
+        current_provider="deepseek",
+    )
+    rendered = str(resolved.request["input"])
+    assert "from cold" in rendered
+
+
+async def test_cold_storage_required_but_missing_raises_503() -> None:
+    """If a row references cold storage but the gateway has none configured,
+    raise ColdStorageUnavailableError (503) instead of an AttributeError. The
+    raise must NOT be an `assert` so it survives 'python -O'."""
+    row = SessionRecord(
+        id="r1",
+        session_id="s1",
+        parent_id=None,
+        model="deepseek-chat",
+        provider="deepseek",
+        input_json=None,
+        output_json=None,
+        usage_json=None,
+        cold_storage_key="some-key",
+        created_at=datetime.now(UTC),
+        ttl_at=None,
+    )
+    resolver = SessionResolver(store=FakeStore([row]), cold_storage=None)
+    with pytest.raises(ColdStorageUnavailableError):
+        await resolver.resolve(
+            {"input": "x", "model": "deepseek-chat", "previous_response_id": "r1"},
+            current_provider="deepseek",
+        )

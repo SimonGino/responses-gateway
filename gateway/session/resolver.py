@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from gateway.errors import (
+    ColdStorageUnavailableError,
     PreviousResponseExpiredError,
     PreviousResponseNotFoundError,
     PreviousResponseProviderMismatchError,
@@ -109,7 +110,12 @@ class SessionResolver:
 
     async def _payload(self, row: SessionRecord, *, field: str) -> dict[str, Any]:
         if row.cold_storage_key:
-            assert self._cold is not None, "cold storage required but not configured"
+            if self._cold is None:
+                # Use raise (not assert) so 'python -O' still produces a clean
+                # 503 instead of an uncaught AttributeError on self._cold.get(...)
+                raise ColdStorageUnavailableError(
+                    f"row {row.id} has cold_storage_key but cold storage is not configured"
+                )
             full = await self._cold.get(row.cold_storage_key)
             return {field: full.get(field, [])}
         if field == "input":
