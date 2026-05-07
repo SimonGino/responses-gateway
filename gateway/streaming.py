@@ -73,9 +73,7 @@ class StreamBridge:
             self._consume(event)
             yield event
 
-    def _synthesize_missing_announcements(
-        self, event: dict[str, Any]
-    ) -> list[dict[str, Any]]:
+    def _synthesize_missing_announcements(self, event: dict[str, Any]) -> list[dict[str, Any]]:
         etype = event.get("type")
         if etype == "response.output_item.added":
             iid = event.get("item", {}).get("id")
