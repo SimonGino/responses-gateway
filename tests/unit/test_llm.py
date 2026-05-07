@@ -124,16 +124,27 @@ async def test_alias_credentials_override_request_supplied_credentials() -> None
 async def test_router_stream_coerces_pydantic_events_to_dicts() -> None:
     """LiteLLM yields Pydantic ResponseCreatedEvent etc. on streaming; the gateway
     must convert them to dicts so the SSE JSON encoder + StreamBridge can use them."""
-    from pydantic import BaseModel
+    from dataclasses import dataclass
 
-    class FakeEvent(BaseModel):
+    @dataclass
+    class FakeEventV2:
+        """Stand-in with a `model_dump` method (mirrors Pydantic v2's API)."""
+
         type: str
-        response: dict[str, Any] | None = None
         delta: str | None = None
+        _resp_id: str | None = None
+
+        def model_dump(self, exclude_none: bool = False) -> dict[str, Any]:
+            out: dict[str, Any] = {"type": self.type}
+            if self._resp_id is not None:
+                out["response"] = {"id": self._resp_id, "output": []}
+            if self.delta is not None:
+                out["delta"] = self.delta
+            return out
 
     events_in = [
-        FakeEvent(type="response.created", response={"id": "x", "output": []}),
-        FakeEvent(type="response.output_text.delta", delta="hi"),
+        FakeEventV2(type="response.created", _resp_id="x"),
+        FakeEventV2(type="response.output_text.delta", delta="hi"),
     ]
 
     async def fake_iter() -> Any:
