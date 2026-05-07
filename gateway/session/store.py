@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -31,39 +32,22 @@ class SessionRecord:
 
     @classmethod
     def from_row(cls, row: SessionRow) -> SessionRecord:
-        return cls(
-            id=row.id,
-            session_id=row.session_id,
-            parent_id=row.parent_id,
-            model=row.model,
-            provider=row.provider,
-            input_json=row.input_json,
-            output_json=row.output_json,
-            usage_json=row.usage_json,
-            cold_storage_key=row.cold_storage_key,
-            created_at=row.created_at,
-            ttl_at=row.ttl_at,
-        )
+        """Build a SessionRecord from an ORM row.
+
+        Auto-maps via dataclass fields so adding a column to SessionRow + this dataclass
+        is a one-place change. If the schemas drift, this will raise TypeError loudly
+        instead of silently dropping data.
+        """
+        return cls(**{f.name: getattr(row, f.name) for f in dataclasses.fields(cls)})
 
     def to_row(self) -> SessionRow:
-        return SessionRow(
-            id=self.id,
-            session_id=self.session_id,
-            parent_id=self.parent_id,
-            model=self.model,
-            provider=self.provider,
-            input_json=self.input_json,
-            output_json=self.output_json,
-            usage_json=self.usage_json,
-            cold_storage_key=self.cold_storage_key,
-            created_at=self.created_at,
-            ttl_at=self.ttl_at,
-        )
+        """Build an ORM row from a SessionRecord. See `from_row` for the auto-map rationale."""
+        return SessionRow(**{f.name: getattr(self, f.name) for f in dataclasses.fields(self)})
 
 
 class SessionStore:
     def __init__(self, db_url: str) -> None:
-        self._engine = create_async_engine(db_url, future=True)
+        self._engine = create_async_engine(db_url)
         self._sessionmaker: async_sessionmaker[AsyncSession] = async_sessionmaker(
             self._engine, expire_on_commit=False
         )
@@ -98,6 +82,10 @@ class SessionStore:
             stmt = delete(SessionRow).where(
                 SessionRow.ttl_at.is_not(None), SessionRow.ttl_at < as_of
             )
+            # AsyncSession.execute is typed as Result[Any], but DML statements
+            # (DELETE/UPDATE) always produce a CursorResult at runtime — that is
+            # the only Result subtype that exposes `rowcount`. The type:ignore
+            # suppresses the inevitable assignment-narrow error on this line only.
             result: CursorResult[Any] = await session.execute(stmt)  # type: ignore[assignment]
             await session.commit()
             return result.rowcount or 0

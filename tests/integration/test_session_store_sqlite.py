@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -11,10 +12,13 @@ from gateway.session.store import SessionRecord, SessionStore
 
 
 @pytest.fixture
-async def store() -> SessionStore:
+async def store() -> AsyncIterator[SessionStore]:
     s = SessionStore("sqlite+aiosqlite:///:memory:")
     await s.create_schema(Base.metadata)
-    return s
+    try:
+        yield s
+    finally:
+        await s.close()
 
 
 async def test_insert_then_get_by_id(store: SessionStore) -> None:
