@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
-from typing import Any, Literal
+from typing import Literal, cast
 
 import structlog
 
@@ -32,5 +32,8 @@ def configure_logging(level: str = "info", format_: Literal["json", "console"] =
     )
 
 
-def get_logger(name: str | None = None) -> Any:
-    return structlog.get_logger(name)
+def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:
+    """Return a structlog logger. We `cast()` the result because structlog's stubs
+    declare `get_logger()` as `Any` and mypy strict mode would otherwise reject the
+    typed return."""
+    return cast("structlog.stdlib.BoundLogger", structlog.get_logger(name))
