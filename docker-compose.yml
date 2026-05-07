@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   postgres:
     image: postgres:16
@@ -17,5 +15,26 @@ services:
       timeout: 3s
       retries: 5
 
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Override config.yaml's storage.url so the gateway always reaches the
+      # compose postgres service regardless of what the file says (config.yaml
+      # may use `localhost` for host-side runs).
+      GATEWAY_STORAGE__URL: postgresql+asyncpg://gateway:gateway@postgres:5432/gateway_dev
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./models.yaml:/app/models.yaml:ro
+      - gateway_data:/app/data
+    restart: unless-stopped
+
 volumes:
   postgres_data:
+  gateway_data:
