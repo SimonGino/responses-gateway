@@ -12,9 +12,9 @@ def new_response_id() -> str:
 
 def new_session_id() -> str:
     """Generate a new session/thread id (raw uuid7 string)."""
-    return str(_uuid7str())
+    return _uuid7str()
 
 
 def new_request_id() -> str:
     """Generate a new HTTP-level request correlation id."""
-    return str(_uuid7str())
+    return _uuid7str()
