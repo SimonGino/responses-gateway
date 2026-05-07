@@ -77,7 +77,7 @@ class S3ColdStorage:
             raise ColdStorageUnavailableError(f"S3 put failed: {exc}") from exc
 
     async def get(self, key: str) -> dict[str, Any]:
-        import aioboto3
+        import aioboto3  # type: ignore[import-untyped]
 
         try:
             async with aioboto3.Session().client("s3") as s3:
