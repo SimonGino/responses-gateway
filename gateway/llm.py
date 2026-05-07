@@ -28,6 +28,24 @@ def provider_from_model(model: str) -> str:
     return model.split("/", 1)[0]
 
 
+def _event_to_dict(event: Any) -> dict[str, Any]:
+    """Coerce a streaming event from LiteLLM into a plain JSON-able dict.
+
+    LiteLLM's `aresponses(stream=True)` yields Pydantic event models
+    (`ResponseCreatedEvent`, `ResponseOutputTextDeltaEvent`, ...) which
+    `json.dumps` cannot serialize directly. StreamBridge and the SSE
+    serializer both assume `dict[str, Any]`, so we normalize at this
+    boundary.
+    """
+    if isinstance(event, dict):
+        return event
+    if hasattr(event, "model_dump"):  # Pydantic v2
+        return cast(dict[str, Any], event.model_dump(exclude_none=True))
+    if hasattr(event, "dict"):  # Pydantic v1 fallback
+        return cast(dict[str, Any], event.dict(exclude_none=True))
+    return {"type": "unknown", "raw": str(event)}
+
+
 def _load_alias_map(model_list_path: str | None) -> dict[str, dict[str, Any]]:
     """Build {request_name: litellm_params_dict} from a LiteLLM model_list yaml.
 
@@ -99,7 +117,7 @@ class LLMRouter:
         except Exception as exc:
             raise self._wrap(exc) from exc
 
-    async def stream(self, *, request: dict[str, Any]) -> AsyncIterator[Any]:
+    async def stream(self, *, request: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         try:
             # Strip `stream` from the caller's request dict before unpacking:
             # this method always adds stream=True explicitly, so leaving it in
@@ -112,7 +130,7 @@ class LLMRouter:
                 num_retries=self._cfg.num_retries,
             )
             async for event in iterator:
-                yield event
+                yield _event_to_dict(event)
         except Exception as exc:
             raise self._wrap(exc) from exc
 

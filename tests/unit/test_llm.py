@@ -121,6 +121,37 @@ async def test_alias_credentials_override_request_supplied_credentials() -> None
     assert m.await_args.kwargs["api_key"] == "server-side-key"
 
 
+async def test_router_stream_coerces_pydantic_events_to_dicts() -> None:
+    """LiteLLM yields Pydantic ResponseCreatedEvent etc. on streaming; the gateway
+    must convert them to dicts so the SSE JSON encoder + StreamBridge can use them."""
+    from pydantic import BaseModel
+
+    class FakeEvent(BaseModel):
+        type: str
+        response: dict[str, Any] | None = None
+        delta: str | None = None
+
+    events_in = [
+        FakeEvent(type="response.created", response={"id": "x", "output": []}),
+        FakeEvent(type="response.output_text.delta", delta="hi"),
+    ]
+
+    async def fake_iter() -> Any:
+        for e in events_in:
+            yield e
+
+    cfg = LiteLLMConfig()
+    router = LLMRouter(cfg)
+    with patch("gateway.llm.litellm.aresponses", new=AsyncMock(return_value=fake_iter())):
+        events_out = [
+            e async for e in router.stream(request={"input": "hi", "model": "deepseek/x"})
+        ]
+    assert all(isinstance(e, dict) for e in events_out)
+    assert events_out[0]["type"] == "response.created"
+    assert events_out[0]["response"]["id"] == "x"
+    assert events_out[1]["delta"] == "hi"
+
+
 def test_load_alias_map_preserves_full_litellm_params(tmp_path: Path) -> None:
     """Loader must capture api_base / api_key, not just the model string."""
     models_yaml = tmp_path / "models.yaml"
