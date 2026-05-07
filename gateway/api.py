@@ -145,22 +145,44 @@ def build_app(config: GatewayConfig) -> FastAPI:
             return response
 
         # Streaming path: tee events to client, then persist final state on close.
+        # Once the SSE stream starts (200 + text/event-stream sent), we cannot
+        # change to an HTTP error response — so any GatewayError raised mid-stream
+        # is emitted as a `response.failed` event followed by `[DONE]` so OpenAI
+        # clients understand the stream terminated cleanly.
         async def _gen() -> AsyncIterator[bytes]:
             bridge = StreamBridge(rewrite_id=new_id)
-            async for event in bridge.tee(llm.stream(request=resolved.request)):
-                yield f"data: {_json.dumps(event)}\n\n".encode()
-            final = bridge.final_state()
-            final["id"] = new_id
-            await recorder.record(
-                response_id=new_id,
-                original_request=payload,
-                response_payload=final,
-                provider=provider,
-                model=payload.get("model", ""),
-                session_id=resolved.session_id,
-                parent_id=resolved.parent_id,
-                store_flag=store_flag,
-            )
+            try:
+                async for event in bridge.tee(llm.stream(request=resolved.request)):
+                    yield f"data: {_json.dumps(event)}\n\n".encode()
+                final = bridge.final_state()
+                final["id"] = new_id
+                await recorder.record(
+                    response_id=new_id,
+                    original_request=payload,
+                    response_payload=final,
+                    provider=provider,
+                    model=payload.get("model", ""),
+                    session_id=resolved.session_id,
+                    parent_id=resolved.parent_id,
+                    store_flag=store_flag,
+                )
+            except GatewayError as exc:
+                _log.warn(
+                    "stream_error_emitting_response_failed",
+                    response_id=new_id,
+                    error_type=exc.error_type,
+                    status_code=exc.status_code,
+                )
+                error_body = exc.to_response_body()["error"]
+                failed_event = {
+                    "type": "response.failed",
+                    "response": {
+                        "id": new_id,
+                        "status": "failed",
+                        "error": error_body,
+                    },
+                }
+                yield f"data: {_json.dumps(failed_event)}\n\n".encode()
             yield b"data: [DONE]\n\n"
 
         return StreamingResponse(_gen(), media_type="text/event-stream")
