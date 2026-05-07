@@ -49,6 +49,9 @@ packages = ["gateway"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 filterwarnings = ["error::DeprecationWarning"]
+markers = [
+    "smoke: real-network smoke tests against live providers (gated, not run by default)",
+]
 
 [tool.ruff]
 line-length = 100
