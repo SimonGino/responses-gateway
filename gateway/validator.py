@@ -23,6 +23,15 @@ class Validator:
         self._cfg = config
         self._rejected_tool_types: set[str] = set(config.tools)
 
+    def _workaround_url(self, feature: str) -> str:
+        """Render the configured workaround URL with `{feature}` substituted.
+
+        Uses string `replace()` rather than `str.format()` so user-customized
+        templates with non-`{feature}` placeholders don't raise KeyError at
+        validation time (turning a config typo into a 500).
+        """
+        return self._cfg.workaround_url_template.replace("{feature}", feature)
+
     def validate(self, request: dict[str, Any], *, provider: str | None = None) -> None:
         """Raise FeatureNotSupportedError if request contains unsupported features."""
         # Tools
@@ -34,7 +43,7 @@ class Validator:
                     feature=ttype,
                     param=f"tools[{i}].type",
                     provider=provider,
-                    workaround_url=self._cfg.workaround_url_template.format(feature=ttype),
+                    workaround_url=self._workaround_url(ttype),
                 )
 
         # Fields rejected by exact value match (e.g. background: true, truncation: "auto")
@@ -46,7 +55,7 @@ class Validator:
                         feature=field,
                         param=field,
                         provider=provider,
-                        workaround_url=self._cfg.workaround_url_template.format(feature=field),
+                        workaround_url=self._workaround_url(field),
                     )
             else:
                 if actual == rejected_value:
@@ -54,7 +63,7 @@ class Validator:
                         feature=field,
                         param=field,
                         provider=provider,
-                        workaround_url=self._cfg.workaround_url_template.format(feature=field),
+                        workaround_url=self._workaround_url(field),
                     )
 
         # Fields rejected purely by presence (e.g. conversation, context_management)
@@ -64,5 +73,5 @@ class Validator:
                     feature=field,
                     param=field,
                     provider=provider,
-                    workaround_url=self._cfg.workaround_url_template.format(feature=field),
+                    workaround_url=self._workaround_url(field),
                 )
