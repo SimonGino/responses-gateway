@@ -90,11 +90,16 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
 
 
 def _parse_env_overrides() -> dict[str, Any]:
-    """Extract GATEWAY_* env vars and convert to nested dict.
+    """Extract GATEWAY_<SECTION>__<FIELD>... env vars and convert to nested dict.
 
     Examples:
         GATEWAY_SERVER__PORT=8080 -> {'server': {'port': 8080}}
         GATEWAY_STORAGE__COLD__ENABLED=true -> {'storage': {'cold': {'enabled': 'true'}}}
+
+    Env vars under GATEWAY_ that *do not* contain the nested delimiter (`__`) are
+    skipped. This avoids slurping unrelated GATEWAY_* env (e.g., a CI's
+    GATEWAY_TEST_STORAGE) that would otherwise produce ValidationErrors against
+    GatewayConfig's strict schema.
 
     Note: ints are coerced; bool/float are left as strings and rely on Pydantic's
     coercion when nested models are constructed.
@@ -104,6 +109,8 @@ def _parse_env_overrides() -> dict[str, Any]:
         if not key.startswith(ENV_PREFIX):
             continue
         remaining = key[len(ENV_PREFIX) :].lower()
+        if ENV_NESTED_DELIMITER not in remaining:
+            continue
         parts = remaining.split(ENV_NESTED_DELIMITER)
 
         current = result

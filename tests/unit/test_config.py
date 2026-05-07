@@ -76,3 +76,16 @@ def test_partial_yaml_only_overrides_specified_sections(tmp_path: Path) -> None:
     # Other sections at defaults
     assert cfg.session.default_ttl_days == 30
     assert cfg.storage.url.startswith("sqlite+aiosqlite")
+
+
+def test_unrelated_gateway_env_vars_are_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GATEWAY_* env vars without `__` delimiter (e.g., GATEWAY_TEST_FOO from CI) must not
+    leak into config parsing — they would otherwise be rejected as extra fields."""
+    yaml_path = tmp_path / "config.yaml"
+    yaml_path.write_text("")
+    monkeypatch.setenv("GATEWAY_TEST_STORAGE", "sqlite")
+    monkeypatch.setenv("GATEWAY_TEST_POSTGRES_URL", "postgresql://x")
+    cfg = load_config(yaml_path)
+    assert cfg.server.port == 8080  # defaults still load cleanly
