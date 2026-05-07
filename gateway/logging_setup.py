@@ -32,8 +32,12 @@ def configure_logging(level: str = "info", format_: Literal["json", "console"] =
     )
 
 
-def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:
-    """Return a structlog logger. We `cast()` the result because structlog's stubs
-    declare `get_logger()` as `Any` and mypy strict mode would otherwise reject the
-    typed return."""
-    return cast("structlog.stdlib.BoundLogger", structlog.get_logger(name))
+def get_logger(name: str | None = None) -> structlog.types.FilteringBoundLogger:
+    """Return a structlog filtering bound logger.
+
+    We use `cast()` because structlog's stubs declare `get_logger()` as `Any` and
+    mypy strict mode would otherwise reject the typed return. The native runtime
+    type matches `make_filtering_bound_logger`'s output (`FilteringBoundLogger`),
+    NOT `structlog.stdlib.BoundLogger` — they have different method surfaces.
+    """
+    return cast("structlog.types.FilteringBoundLogger", structlog.get_logger(name))

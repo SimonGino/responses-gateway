@@ -9,6 +9,7 @@ from gateway.errors import (
     PreviousResponseExpiredError,
     PreviousResponseNotFoundError,
     PreviousResponseProviderMismatchError,
+    ProviderError,
     StorageUnavailableError,
 )
 
@@ -55,3 +56,28 @@ def test_cold_storage_read_unavailable_is_503() -> None:
 
 def test_gateway_error_is_base() -> None:
     assert issubclass(FeatureNotSupportedError, GatewayError)
+
+
+def test_provider_error_uses_instance_status_code() -> None:
+    """ProviderError per-instance status_code overrides the class default."""
+    err = ProviderError("rate limited", status_code=429)
+    assert err.status_code == 429
+    assert err.error_type == "provider_error"
+
+
+def test_provider_error_includes_details_in_body_when_present() -> None:
+    err = ProviderError(
+        "upstream auth failed",
+        status_code=401,
+        details={"type": "invalid_api_key", "code": "401"},
+    )
+    body = err.to_response_body()
+    assert body["error"]["type"] == "provider_error"
+    assert body["error"]["message"] == "upstream auth failed"
+    assert body["error"]["details"] == {"type": "invalid_api_key", "code": "401"}
+
+
+def test_provider_error_omits_details_when_empty() -> None:
+    err = ProviderError("model down", status_code=503)
+    body = err.to_response_body()
+    assert "details" not in body["error"]
