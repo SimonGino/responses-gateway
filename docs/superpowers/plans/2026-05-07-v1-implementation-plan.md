@@ -1583,6 +1583,33 @@ git commit -m "feat(storage): cold storage interface, in-memory backend, S3 back
 - Create: `gateway/validator.py`
 - Create: `tests/unit/test_validator.py`
 
+- [ ] **Step 8.0: Extend `RejectConfig` in `gateway/config.py`**
+
+Add a `present_fields` attribute to `RejectConfig`:
+
+```python
+class RejectConfig(BaseModel):
+    tools: list[str] = Field(...)
+    fields: dict[str, Any] = Field(default_factory=lambda: {"background": True, "truncation": "auto"})
+    present_fields: list[str] = Field(default_factory=lambda: ["conversation", "context_management"])
+    workaround_url_template: str = ...
+```
+
+Update `tests/unit/test_config.py` if a test references `RejectConfig` fields directly (it currently does not, but verify with `grep RejectConfig tests/`).
+
+Also update `config.example.yaml` to show the new field:
+
+```yaml
+reject:
+  tools: [...]
+  fields:
+    background: true
+    truncation: "auto"
+  present_fields:
+    - conversation
+    - context_management
+```
+
 - [ ] **Step 8.1: Write failing test `tests/unit/test_validator.py`**
 
 ```python
@@ -1657,6 +1684,23 @@ def test_workaround_url_template_substitution(validator: Validator) -> None:
         validator.validate({"input": "hi", "tools": [{"type": "web_search"}]})
     # Message should contain the URL with {feature} substituted
     assert "web_search" in str(exc.value)
+
+
+def test_rejects_conversation_field_presence(validator: Validator) -> None:
+    with pytest.raises(FeatureNotSupportedError) as exc:
+        validator.validate({"input": "hi", "conversation": "conv_123"})
+    assert exc.value.feature == "conversation"
+
+
+def test_rejects_context_management_presence(validator: Validator) -> None:
+    with pytest.raises(FeatureNotSupportedError) as exc:
+        validator.validate({"input": "hi", "context_management": {"strategy": "summarize"}})
+    assert exc.value.feature == "context_management"
+
+
+def test_allows_request_without_present_fields(validator: Validator) -> None:
+    # Plain request should not trip presence rejection
+    validator.validate({"input": "hi", "model": "deepseek/deepseek-chat"})
 ```
 
 Run: `pytest tests/unit/test_validator.py -v`
@@ -1696,10 +1740,9 @@ class Validator:
                     workaround_url=self._cfg.workaround_url_template.format(feature=ttype),
                 )
 
-        # Top-level fields
+        # Fields rejected by exact value match (e.g. background: true, truncation: "auto")
         for field, rejected_value in self._cfg.fields.items():
             actual = request.get(field)
-            # For booleans we reject only when actual matches the rejected truthy value
             if isinstance(rejected_value, bool):
                 if actual is rejected_value:
                     raise FeatureNotSupportedError(
@@ -1716,12 +1759,22 @@ class Validator:
                         provider=provider,
                         workaround_url=self._cfg.workaround_url_template.format(feature=field),
                     )
+
+        # Fields rejected purely by presence (e.g. conversation, context_management)
+        for field in self._cfg.present_fields:
+            if field in request and request[field] is not None:
+                raise FeatureNotSupportedError(
+                    feature=field,
+                    param=field,
+                    provider=provider,
+                    workaround_url=self._cfg.workaround_url_template.format(feature=field),
+                )
 ```
 
 - [ ] **Step 8.3: Run validator tests pass**
 
 Run: `pytest tests/unit/test_validator.py -v`
-Expected: 8 PASSED.
+Expected: 11 PASSED.
 
 - [ ] **Step 8.4: Commit**
 
@@ -1857,6 +1910,42 @@ async def test_provider_mismatch_raises_409() -> None:
             {"input": "x", "model": "deepseek-chat", "previous_response_id": "r1"},
             current_provider="deepseek",
         )
+
+
+async def test_walk_chain_ignores_branch_siblings() -> None:
+    """Two children of the same parent must not bleed into each other's chains."""
+    rows = [
+        _row("root", "s1", None, output_json={"output": [{"type": "message", "content": [{"type": "output_text", "text": "root reply"}]}]}),
+        _row("branch_a", "s1", "root", output_json={"output": [{"type": "message", "content": [{"type": "output_text", "text": "branch a"}]}]}),
+        _row("branch_b", "s1", "root", output_json={"output": [{"type": "message", "content": [{"type": "output_text", "text": "branch b"}]}]}),
+    ]
+    resolver = SessionResolver(store=FakeStore(rows), cold_storage=None)
+    req = {"input": "follow-up", "model": "deepseek-chat", "previous_response_id": "branch_a"}
+    resolved = await resolver.resolve(req, current_provider="deepseek")
+    rendered = str(resolved.request["input"])
+    assert "branch a" in rendered
+    assert "branch b" not in rendered  # the sibling must NOT appear
+
+
+async def test_old_instructions_dropped_from_history() -> None:
+    """Past `instructions` must not become system messages in the rebuilt history."""
+    history = [_row(
+        "r1", "s1", None,
+        input_json={
+            "input": [
+                {"role": "system", "content": "old system prompt — should be dropped"},
+                {"role": "user", "content": "hello"},
+            ],
+        },
+    )]
+    resolver = SessionResolver(store=FakeStore(history), cold_storage=None)
+    resolved = await resolver.resolve(
+        {"input": "follow-up", "model": "deepseek-chat", "previous_response_id": "r1"},
+        current_provider="deepseek",
+    )
+    new_input_str = str(resolved.request["input"])
+    assert "old system prompt" not in new_input_str
+    assert "hello" in new_input_str
 ```
 
 Run: `pytest tests/unit/test_session_resolver.py -v`
@@ -1867,9 +1956,15 @@ Expected: FAIL `ModuleNotFoundError`.
 ```python
 """SessionResolver — intercept previous_response_id and rebuild full message history.
 
-Strategy: rather than passing previous_response_id down to LiteLLM (whose SessionHandler
-requires the LiteLLM Proxy spend_logs DB), we resolve it ourselves from our own session table
-and prepend reconstructed messages to the current request input.
+Strategy: rather than passing previous_response_id down to LiteLLM (whose
+SessionHandler requires the LiteLLM Proxy spend_logs DB), we resolve it ourselves
+from our own session table and prepend reconstructed messages to the current
+request input.
+
+Walking strategy: iterate up the `parent_id` chain from the given
+previous_response_id. Do NOT use `session_id` for retrieval — branched siblings
+share the same session_id, but the chained linear history must follow parent_id
+pointers only.
 """
 from __future__ import annotations
 
@@ -1887,7 +1982,6 @@ from gateway.session.store import SessionRecord
 
 class _StoreLike(Protocol):
     async def get_by_id(self, response_id: str) -> SessionRecord | None: ...
-    async def list_by_session_id(self, session_id: str) -> list[SessionRecord]: ...
 
 
 class _ColdLike(Protocol):
@@ -1899,8 +1993,8 @@ class ResolvedRequest:
     """Request after previous_response_id resolution."""
 
     request: dict[str, Any]
-    session_id: str | None  # None if no chain (new session)
-    parent_id: str | None  # the previous_response_id used (None for new session)
+    session_id: str | None
+    parent_id: str | None
 
 
 class SessionResolver:
@@ -1918,23 +2012,18 @@ class SessionResolver:
         parent = await self._store.get_by_id(prev_id)
         if parent is None:
             raise PreviousResponseNotFoundError(previous_response_id=prev_id)
-
         if parent.ttl_at is not None and parent.ttl_at < datetime.now(UTC):
             raise PreviousResponseExpiredError(previous_response_id=prev_id)
-
         if parent.provider != current_provider:
             raise PreviousResponseProviderMismatchError(
                 parent_provider=parent.provider, current_provider=current_provider
             )
 
-        # Pull full chain (including parent itself) ordered by created_at
-        chain = await self._store.list_by_session_id(parent.session_id)
-        history_messages = await self._reconstruct_messages(chain)
+        chain = await self._walk_parent_chain(prev_id)
+        history = await self._reconstruct_messages(chain)
 
-        # Build new input: history + the current input items
         current_input = request.get("input", [])
-        new_input = history_messages + self._normalize_current_input(current_input)
-
+        new_input = history + self._normalize_current_input(current_input)
         new_request = {**request, "input": new_input}
         new_request.pop("previous_response_id", None)
 
@@ -1942,35 +2031,56 @@ class SessionResolver:
             request=new_request, session_id=parent.session_id, parent_id=prev_id
         )
 
-    async def _reconstruct_messages(self, chain: list[SessionRecord]) -> list[dict[str, Any]]:
-        """Walk each historical row, append (user-input, assistant-output) pairs."""
+    async def _walk_parent_chain(self, start_id: str) -> list[SessionRecord]:
+        """Walk parent_id pointers to root, return chain in chronological order."""
+        chain: list[SessionRecord] = []
+        visited: set[str] = set()
+        cur: str | None = start_id
+        while cur and cur not in visited:
+            visited.add(cur)
+            row = await self._store.get_by_id(cur)
+            if row is None:
+                break
+            chain.append(row)
+            cur = row.parent_id
+        chain.reverse()
+        return chain
+
+    async def _reconstruct_messages(
+        self, chain: list[SessionRecord]
+    ) -> list[dict[str, Any]]:
+        """Build chat-completions-style messages from a walked chain.
+
+        Per OpenAI Responses API: previous_response_id does NOT inherit old
+        `instructions`. We therefore extract only the user-facing input items
+        from each historical row (skipping any system messages produced from
+        past `instructions`), plus the row's output messages.
+        """
         messages: list[dict[str, Any]] = []
         for row in chain:
             input_payload = await self._payload(row, field="input")
             output_payload = await self._payload(row, field="output")
-            messages.extend(self._normalize_current_input(input_payload.get("input", [])))
+            messages.extend(
+                self._extract_non_system_input(input_payload.get("input", []))
+            )
             for item in output_payload.get("output", []):
                 if isinstance(item, dict) and item.get("type") == "message":
                     messages.append({"role": "assistant", "content": item.get("content", [])})
-                # function_call items: pass through as-is so model sees its own tool calls
                 elif isinstance(item, dict) and item.get("type") == "function_call":
                     messages.append(item)
         return messages
 
     async def _payload(self, row: SessionRecord, *, field: str) -> dict[str, Any]:
-        """Read input or output JSON, falling back to cold storage if offloaded."""
         if row.cold_storage_key:
             assert self._cold is not None, "cold storage required but not configured"
             full = await self._cold.get(row.cold_storage_key)
             return {field: full.get(field, [])}
-
         if field == "input":
             return row.input_json or {"input": []}
         return row.output_json or {"output": []}
 
     @staticmethod
     def _normalize_current_input(current: Any) -> list[dict[str, Any]]:
-        """Coerce the various Responses input shapes into a list of message-like dicts."""
         if isinstance(current, str):
             return [{"role": "user", "content": current}]
         if isinstance(current, list):
@@ -1978,12 +2088,27 @@ class SessionResolver:
         if isinstance(current, dict):
             return [current]
         return []
+
+    @staticmethod
+    def _extract_non_system_input(items: Any) -> list[dict[str, Any]]:
+        """Filter out system messages from a stored Responses-API input.
+
+        Past `instructions` (which in chat form became system messages) must
+        not bleed into the new request's system prompt.
+        """
+        normalized = SessionResolver._normalize_current_input(items)
+        out: list[dict[str, Any]] = []
+        for item in normalized:
+            if isinstance(item, dict) and item.get("role") == "system":
+                continue
+            out.append(item)
+        return out
 ```
 
 - [ ] **Step 9.3: Run resolver tests pass**
 
 Run: `pytest tests/unit/test_session_resolver.py -v`
-Expected: 5 PASSED.
+Expected: 7 PASSED.
 
 - [ ] **Step 9.4: Commit**
 
@@ -2033,7 +2158,8 @@ async def test_recorder_stores_new_session_when_no_parent() -> None:
     recorder = SessionRecorder(
         store=store, cold_storage=None, ttl_days=30, threshold_bytes=1_048_576
     )
-    new_id = await recorder.record(
+    await recorder.record(
+        response_id="resp_provided_001",
         original_request={"input": "hi", "model": "deepseek-chat"},
         response_payload={"id": "ignored", "output": [{"type": "message"}], "usage": {"input_tokens": 5}},
         provider="deepseek",
@@ -2042,10 +2168,9 @@ async def test_recorder_stores_new_session_when_no_parent() -> None:
         parent_id=None,
         store_flag=True,
     )
-    assert new_id.startswith("resp_")
     assert len(store.records) == 1
     rec = store.records[0]
-    assert rec.id == new_id
+    assert rec.id == "resp_provided_001"
     assert rec.parent_id is None
     assert rec.session_id  # newly generated
     assert rec.input_json == {"input": "hi", "model": "deepseek-chat"}
@@ -2059,7 +2184,8 @@ async def test_recorder_inherits_session_id_from_chain() -> None:
     recorder = SessionRecorder(
         store=store, cold_storage=None, ttl_days=30, threshold_bytes=1_048_576
     )
-    new_id = await recorder.record(
+    await recorder.record(
+        response_id="resp_provided_002",
         original_request={"input": "msg2"},
         response_payload={"output": []},
         provider="deepseek",
@@ -2078,7 +2204,8 @@ async def test_recorder_skips_when_store_false() -> None:
     recorder = SessionRecorder(
         store=store, cold_storage=None, ttl_days=30, threshold_bytes=1_048_576
     )
-    new_id = await recorder.record(
+    await recorder.record(
+        response_id="resp_provided_003",
         original_request={"input": "hi"},
         response_payload={"output": []},
         provider="deepseek",
@@ -2087,8 +2214,7 @@ async def test_recorder_skips_when_store_false() -> None:
         parent_id=None,
         store_flag=False,
     )
-    # Still returns a generated id (so client gets one) but does not persist
-    assert new_id.startswith("resp_")
+    # store_flag=False means no persistence; returns None
     assert store.records == []
 
 
@@ -2100,6 +2226,7 @@ async def test_recorder_offloads_to_cold_storage_when_over_threshold() -> None:
     big_input = {"input": "x" * 200}
     big_output = {"output": [{"type": "message", "content": "y" * 200}]}
     await recorder.record(
+        response_id="resp_provided_004",
         original_request=big_input,
         response_payload=big_output,
         provider="deepseek",
@@ -2131,6 +2258,7 @@ async def test_recorder_falls_back_inline_on_cold_write_failure() -> None:
         store=store, cold_storage=ExplodingCold(), ttl_days=30, threshold_bytes=1
     )
     await recorder.record(
+        response_id="resp_provided_005",
         original_request={"input": "hi"},
         response_payload={"output": []},
         provider="deepseek",
@@ -2151,14 +2279,19 @@ Expected: FAIL `ModuleNotFoundError`.
 - [ ] **Step 10.2: Implement `gateway/session/recorder.py`**
 
 ```python
-"""SessionRecorder — persists a completed Responses-API call to the session table."""
+"""SessionRecorder — persists a completed Responses-API call to the session table.
+
+The response_id is provided by the caller (generated in the API layer before
+the LiteLLM call so it can be embedded in streaming events). This module
+only persists; it does not generate ids.
+"""
 from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
-from gateway.ids import new_response_id, new_session_id
+from gateway.ids import new_session_id
 from gateway.logging_setup import get_logger
 from gateway.session.store import SessionRecord
 
@@ -2191,6 +2324,7 @@ class SessionRecorder:
     async def record(
         self,
         *,
+        response_id: str,
         original_request: dict[str, Any],
         response_payload: dict[str, Any],
         provider: str,
@@ -2198,18 +2332,22 @@ class SessionRecorder:
         session_id: str | None,
         parent_id: str | None,
         store_flag: bool,
-    ) -> str:
-        """Record a finished call. Returns the new response id (always generated)."""
-        new_id = new_response_id()
+    ) -> None:
+        """Persist a finished call. No-op if store_flag is False.
+
+        The caller is responsible for generating `response_id` (typically
+        in the HTTP layer, before the LLM call, so streaming events can
+        carry the gateway-assigned id from response.created onward).
+        """
         if not store_flag:
-            return new_id
+            return
 
         sid = session_id or new_session_id()
         now = datetime.now(UTC)
         ttl_at = now + self._ttl
 
         rec = SessionRecord(
-            id=new_id,
+            id=response_id,
             session_id=sid,
             parent_id=parent_id,
             model=model,
@@ -2222,7 +2360,6 @@ class SessionRecorder:
             ttl_at=ttl_at,
         )
 
-        # Cold offload if over threshold
         size = len(json.dumps(original_request)) + len(json.dumps(response_payload))
         if self._cold is not None and size > self._threshold:
             try:
@@ -2236,11 +2373,10 @@ class SessionRecorder:
                 _log.warn(
                     "cold_storage_write_failed_falling_back_inline",
                     error=str(exc),
-                    response_id=new_id,
+                    response_id=response_id,
                 )
 
         await self._store.insert(rec)
-        return new_id
 ```
 
 - [ ] **Step 10.3: Run recorder tests pass**
@@ -2271,6 +2407,7 @@ git commit -m "feat(session): SessionRecorder with cold-offload fallback (#7)"
 """Tests for the LiteLLM wrapper."""
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -2314,6 +2451,38 @@ async def test_router_wraps_litellm_error_as_provider_error() -> None:
         with pytest.raises(ProviderError) as exc:
             await router.call(request={"input": "hi", "model": "deepseek/deepseek-chat"})
     assert exc.value.status_code == 429
+
+
+def test_alias_map_resolves_alias_to_litellm_string(tmp_path: Path) -> None:
+    models_yaml = tmp_path / "models.yaml"
+    models_yaml.write_text(
+        """
+model_list:
+  - model_name: default-qwen
+    litellm_params:
+      model: dashscope/qwen-max
+  - model_name: cheap
+    litellm_params:
+      model: deepseek/deepseek-chat
+"""
+    )
+    cfg = LiteLLMConfig(model_list_path=str(models_yaml))
+    router = LLMRouter(cfg)
+    assert router.resolve_model("default-qwen") == "dashscope/qwen-max"
+    assert router.resolve_model("cheap") == "deepseek/deepseek-chat"
+    # Pass-through when not aliased
+    assert router.resolve_model("openai/gpt-4o") == "openai/gpt-4o"
+
+
+async def test_router_uses_resolved_model_when_calling_litellm() -> None:
+    """If alias resolves, the litellm.aresponses call must receive the resolved string, not the alias."""
+    fake_response = {"id": "resp_x", "output": [], "usage": {}}
+    cfg = LiteLLMConfig()
+    router = LLMRouter(cfg)
+    router._alias_map = {"my-alias": "deepseek/deepseek-chat"}
+    with patch("gateway.llm.litellm.aresponses", new=AsyncMock(return_value=fake_response)) as m:
+        await router.call(request={"input": "hi", "model": "my-alias"})
+    assert m.await_args.kwargs["model"] == "deepseek/deepseek-chat"
 ```
 
 Run: `pytest tests/unit/test_llm.py -v`
@@ -2322,12 +2491,21 @@ Expected: FAIL `ModuleNotFoundError`.
 - [ ] **Step 11.2: Implement `gateway/llm.py`**
 
 ```python
-"""Thin wrapper around `litellm.aresponses`. The only LLM dependency in the gateway."""
+"""Thin wrapper around `litellm.aresponses`. The only LLM dependency in the gateway.
+
+Reads a LiteLLM-format `model_list` YAML purely as an alias map: a request
+asking for `default-qwen` will route to `dashscope/qwen-max` (etc.). Does NOT
+instantiate `litellm.Router` — fallback chains, load balancing, cooldowns,
+virtual keys are out of scope for v1. Multi-deployment routing is delegated
+to whatever load balancer sits in front of the gateway.
+"""
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, AsyncIterator
 
 import litellm
+import yaml
 
 from gateway.config import LiteLLMConfig
 from gateway.errors import ProviderError
@@ -2340,29 +2518,45 @@ def provider_from_model(model: str) -> str:
     return model.split("/", 1)[0]
 
 
+def _load_alias_map(model_list_path: str | None) -> dict[str, str]:
+    """Build {request_name: litellm_string} from a LiteLLM model_list yaml.
+
+    Each entry's `model_name` is the alias clients use; its `litellm_params.model`
+    is the actual LiteLLM-recognized provider/model string.
+    """
+    if not model_list_path:
+        return {}
+    p = Path(model_list_path)
+    if not p.exists():
+        return {}
+    with p.open() as f:
+        cfg = yaml.safe_load(f) or {}
+    entries = cfg.get("model_list") or []
+    aliases: dict[str, str] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("model_name")
+        params = entry.get("litellm_params") or {}
+        litellm_model = params.get("model") if isinstance(params, dict) else None
+        if name and litellm_model:
+            aliases[str(name)] = str(litellm_model)
+    return aliases
+
+
 class LLMRouter:
     def __init__(self, config: LiteLLMConfig) -> None:
         self._cfg = config
-        # If a model_list_path is configured, register it with litellm
-        if config.model_list_path:
-            try:
-                import yaml
+        self._alias_map = _load_alias_map(config.model_list_path)
 
-                with open(config.model_list_path) as f:
-                    cfg = yaml.safe_load(f)
-                if isinstance(cfg, dict) and "model_list" in cfg:
-                    litellm.set_verbose = False  # honor user log level
-                    # Register models via Router not strictly needed; litellm.aresponses
-                    # picks up env keys directly. Loading the list lets users define api_base etc.
-                    # We rely on litellm's own config loading via env or programmatic registration.
-            except FileNotFoundError:
-                pass
+    def resolve_model(self, requested: str) -> str:
+        """Map alias → real LiteLLM model string. Pass-through if not aliased."""
+        return self._alias_map.get(requested, requested)
 
     async def call(self, *, request: dict[str, Any]) -> dict[str, Any]:
-        """Non-streaming call."""
         try:
             return await litellm.aresponses(
-                **request,
+                **{**request, "model": self.resolve_model(request.get("model", ""))},
                 timeout=self._cfg.request_timeout,
                 num_retries=self._cfg.num_retries,
             )
@@ -2370,10 +2564,9 @@ class LLMRouter:
             raise self._wrap(exc) from exc
 
     async def stream(self, *, request: dict[str, Any]) -> AsyncIterator[Any]:
-        """Streaming call. Returns an async iterator over Responses events."""
         try:
             iterator = await litellm.aresponses(
-                **request,
+                **{**request, "model": self.resolve_model(request.get("model", ""))},
                 stream=True,
                 timeout=self._cfg.request_timeout,
                 num_retries=self._cfg.num_retries,
@@ -2397,7 +2590,7 @@ class LLMRouter:
 - [ ] **Step 11.3: Run LLM tests pass**
 
 Run: `pytest tests/unit/test_llm.py -v`
-Expected: 3 PASSED.
+Expected: 5 PASSED.
 
 - [ ] **Step 11.4: Commit**
 
@@ -2486,6 +2679,27 @@ async def test_bridge_handles_function_call_arguments_delta() -> None:
     fc_items = [it for it in final["output"] if it.get("type") == "function_call"]
     assert len(fc_items) == 1
     assert fc_items[0]["arguments"] == '{"q":"hi"}'
+
+
+async def test_bridge_rewrites_id_in_lifecycle_events() -> None:
+    """When constructed with rewrite_id, lifecycle events' response.id must be replaced."""
+    events = [
+        {"type": "response.created", "response": {"id": "litellm_orig", "output": [], "usage": {}}},
+        {"type": "response.output_text.delta", "delta": "hi"},
+        {"type": "response.completed", "response": {"id": "litellm_orig", "output": [], "usage": {}}},
+    ]
+
+    async def src():
+        for e in events:
+            yield e
+
+    bridge = StreamBridge(rewrite_id="resp_gateway_xxx")
+    forwarded = [evt async for evt in bridge.tee(src())]
+    # Lifecycle events rewritten:
+    assert forwarded[0]["response"]["id"] == "resp_gateway_xxx"
+    assert forwarded[2]["response"]["id"] == "resp_gateway_xxx"
+    # Non-lifecycle event (delta) untouched:
+    assert "response" not in forwarded[1]
 ```
 
 Run: `pytest tests/unit/test_streaming.py -v`
@@ -2496,6 +2710,12 @@ Expected: FAIL `ModuleNotFoundError`.
 ```python
 """Streaming bridge: tee Responses-API events while accumulating the final state.
 
+When constructed with a `rewrite_id`, mutates the `response.id` field of
+lifecycle events (response.created / response.in_progress / response.completed /
+response.failed / response.incomplete) so the client sees the gateway-assigned
+id from the very first event. This guarantees the client can immediately use
+that id for a follow-up `previous_response_id` call.
+
 The final state mirrors what a non-streaming response would have looked like, so
 SessionRecorder can persist it consistently regardless of streaming mode.
 """
@@ -2503,18 +2723,44 @@ from __future__ import annotations
 
 from typing import Any, AsyncIterator
 
+_LIFECYCLE_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        "response.created",
+        "response.in_progress",
+        "response.completed",
+        "response.failed",
+        "response.incomplete",
+    }
+)
+
 
 class StreamBridge:
-    def __init__(self) -> None:
+    def __init__(self, *, rewrite_id: str | None = None) -> None:
+        self._rewrite_id = rewrite_id
         self._items_by_id: dict[str, dict[str, Any]] = {}
         self._item_order: list[str] = []
         self._final_response: dict[str, Any] = {"output": [], "usage": {}}
 
-    async def tee(self, source: AsyncIterator[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
-        """Forward each event downstream while updating internal final-state buffer."""
+    async def tee(
+        self, source: AsyncIterator[dict[str, Any]]
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Forward each event downstream while updating the internal final-state buffer.
+
+        Lifecycle events get their `response.id` rewritten to `self._rewrite_id`
+        before being forwarded (and before being consumed into final state).
+        """
         async for event in source:
+            self._maybe_rewrite_id(event)
             self._consume(event)
             yield event
+
+    def _maybe_rewrite_id(self, event: dict[str, Any]) -> None:
+        if not self._rewrite_id:
+            return
+        if event.get("type") in _LIFECYCLE_EVENT_TYPES:
+            resp = event.get("response")
+            if isinstance(resp, dict):
+                resp["id"] = self._rewrite_id
 
     def _consume(self, event: dict[str, Any]) -> None:
         etype = event.get("type")
@@ -2532,7 +2778,6 @@ class StreamBridge:
                 self._item_order.append(iid)
             return
         if etype == "response.output_text.delta":
-            # Latest output_text item gets the delta appended
             item = self._latest_item_of_type("message")
             if item:
                 content = item.setdefault("content", [])
@@ -2568,7 +2813,6 @@ class StreamBridge:
         return None
 
     def final_state(self) -> dict[str, Any]:
-        """Return the accumulated final response."""
         out = dict(self._final_response)
         out["output"] = [self._items_by_id[iid] for iid in self._item_order]
         return out
@@ -2577,7 +2821,7 @@ class StreamBridge:
 - [ ] **Step 12.3: Run streaming tests pass**
 
 Run: `pytest tests/unit/test_streaming.py -v`
-Expected: 2 PASSED.
+Expected: 3 PASSED.
 
 - [ ] **Step 12.4: Commit**
 
@@ -2927,15 +3171,23 @@ def build_app(config: GatewayConfig) -> FastAPI:
 
     @app.post("/v1/responses")
     async def create_response(payload: dict[str, Any]) -> dict[str, Any]:
+        from gateway.ids import new_response_id
+
         provider = provider_from_model(payload.get("model", ""))
         validator.validate(payload, provider=provider)
 
         store_flag = payload.pop("store", config.session.default_store)
 
+        # Generate gateway-side id BEFORE calling LiteLLM. Even non-streaming
+        # benefits: the persisted row's id matches what the client gets back.
+        new_id = new_response_id()
+
         resolved = await resolver.resolve(payload, current_provider=provider)
         response = await llm.call(request=resolved.request)
+        response["id"] = new_id
 
-        new_id = await recorder.record(
+        await recorder.record(
+            response_id=new_id,
             original_request=payload,
             response_payload=response,
             provider=provider,
@@ -2944,7 +3196,7 @@ def build_app(config: GatewayConfig) -> FastAPI:
             parent_id=resolved.parent_id,
             store_flag=store_flag,
         )
-        return {**response, "id": new_id}
+        return response
 
     return app
 ```
@@ -3019,17 +3271,23 @@ from gateway.streaming import StreamBridge
 
 @app.post("/v1/responses")
 async def create_response(request: Request, payload: dict[str, Any]) -> Any:
+    from gateway.ids import new_response_id
+
     provider = provider_from_model(payload.get("model", ""))
     validator.validate(payload, provider=provider)
 
     store_flag = payload.pop("store", config.session.default_store)
     streaming = bool(payload.get("stream", False))
 
+    new_id = new_response_id()
+
     resolved = await resolver.resolve(payload, current_provider=provider)
 
     if not streaming:
         response = await llm.call(request=resolved.request)
-        new_id = await recorder.record(
+        response["id"] = new_id
+        await recorder.record(
+            response_id=new_id,
             original_request=payload,
             response_payload=response,
             provider=provider,
@@ -3038,16 +3296,16 @@ async def create_response(request: Request, payload: dict[str, Any]) -> Any:
             parent_id=resolved.parent_id,
             store_flag=store_flag,
         )
-        return {**response, "id": new_id}
+        return response
 
-    # Streaming path: tee events to client, then persist final_state
     async def _gen() -> AsyncIterator[bytes]:
-        bridge = StreamBridge()
+        bridge = StreamBridge(rewrite_id=new_id)
         async for event in bridge.tee(llm.stream(request=resolved.request)):
             yield f"data: {_json.dumps(event)}\n\n".encode()
-        # After stream end, persist
         final = bridge.final_state()
+        final["id"] = new_id
         await recorder.record(
+            response_id=new_id,
             original_request=payload,
             response_payload=final,
             provider=provider,
