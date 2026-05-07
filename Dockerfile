@@ -26,16 +26,30 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 FROM python:3.12-slim AS runtime
 
+# Non-root runtime user. The container still starts as root so the entrypoint
+# can chown the named volume mountpoint, then setpriv drops to appuser.
+RUN groupadd --system --gid 10001 appgroup \
+ && useradd  --system --uid 10001 --gid appgroup --shell /bin/sh --no-create-home appuser
+
 WORKDIR /app
 
-# Bring over the venv + source.
-COPY --from=builder /app /app
+# Bring over the venv + source, owned by appuser.
+COPY --from=builder --chown=appuser:appgroup /app /app
+
+# Pre-create the data dir so a freshly-created named volume inherits appuser
+# ownership; the entrypoint additionally chowns it for pre-existing volumes.
+RUN mkdir -p /app/data && chown appuser:appgroup /app/data
+
+COPY --chmod=0755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \
+    HOME=/app
 
 EXPOSE 8080
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
 # Run migrations against whatever DB the env points at, then serve. Single-
 # replica deployment assumption — multi-replica needs a separate migrate job.
