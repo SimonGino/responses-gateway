@@ -56,7 +56,11 @@ class SessionResolver:
         parent = await self._store.get_by_id(prev_id)
         if parent is None:
             raise PreviousResponseNotFoundError(previous_response_id=prev_id)
-        if parent.ttl_at is not None and parent.ttl_at < datetime.now(UTC):
+        ttl = parent.ttl_at
+        if ttl is not None and ttl.tzinfo is None:
+            # SQLite stores datetimes as naive UTC; make aware so we can compare.
+            ttl = ttl.replace(tzinfo=UTC)
+        if ttl is not None and ttl < datetime.now(UTC):
             raise PreviousResponseExpiredError(previous_response_id=prev_id)
         if parent.provider != current_provider:
             raise PreviousResponseProviderMismatchError(

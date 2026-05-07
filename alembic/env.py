@@ -1,4 +1,5 @@
 """Alembic env: load metadata from gateway models and DB url from GATEWAY_STORAGE__URL or alembic.ini."""
+
 from __future__ import annotations
 
 import asyncio

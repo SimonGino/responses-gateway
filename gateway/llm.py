@@ -77,8 +77,12 @@ class LLMRouter:
 
     async def stream(self, *, request: dict[str, Any]) -> AsyncIterator[Any]:
         try:
+            # Strip `stream` from the caller's request dict before unpacking:
+            # this method always adds stream=True explicitly, so leaving it in
+            # the spread would produce a "multiple values for keyword argument" error.
+            request_without_stream = {k: v for k, v in request.items() if k != "stream"}
             iterator = await litellm.aresponses(
-                **{**request, "model": self.resolve_model(request.get("model", ""))},
+                **{**request_without_stream, "model": self.resolve_model(request.get("model", ""))},
                 stream=True,
                 timeout=self._cfg.request_timeout,
                 num_retries=self._cfg.num_retries,

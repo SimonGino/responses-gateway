@@ -1,19 +1,28 @@
-"""FastAPI app factory + lifespan + middleware + error handlers."""
+"""FastAPI app factory + lifespan + middleware + error handlers + /v1/responses."""
 
 from __future__ import annotations
 
+import json as _json
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from gateway.config import GatewayConfig, load_config
 from gateway.errors import FeatureNotSupportedError, GatewayError
-from gateway.ids import new_request_id
+from gateway.ids import new_request_id, new_response_id
+from gateway.llm import LLMRouter, provider_from_model
 from gateway.logging_setup import configure_logging, get_logger
+from gateway.session.recorder import SessionRecorder
+from gateway.session.resolver import SessionResolver
+from gateway.session.store import SessionStore
+from gateway.storage.cold import build_cold_storage
+from gateway.streaming import StreamBridge
+from gateway.validator import Validator
 
 _log = get_logger(__name__)
 
@@ -41,6 +50,29 @@ def build_app(config: GatewayConfig) -> FastAPI:
     app.state.config = config
     app.add_middleware(RequestIdMiddleware)
 
+    # Build dependencies once at app construction time
+    store = SessionStore(config.storage.url)
+    cold = build_cold_storage(
+        enabled=config.storage.cold.enabled,
+        backend=config.storage.cold.backend,
+        bucket_url=config.storage.cold.bucket_url,
+    )
+    validator = Validator(config.reject)
+    resolver = SessionResolver(store=store, cold_storage=cold)
+    recorder = SessionRecorder(
+        store=store,
+        cold_storage=cold,
+        ttl_days=config.session.default_ttl_days,
+        threshold_bytes=config.storage.cold.threshold_bytes,
+    )
+    llm = LLMRouter(config.litellm)
+
+    app.state.session_store = store
+    app.state.validator = validator
+    app.state.resolver = resolver
+    app.state.recorder = recorder
+    app.state.llm = llm
+
     @app.exception_handler(GatewayError)
     async def _gw_handler(request: Request, exc: GatewayError) -> JSONResponse:
         body = exc.to_response_body()
@@ -55,17 +87,67 @@ def build_app(config: GatewayConfig) -> FastAPI:
     async def healthz() -> dict[str, str]:
         return {"status": "ok"}
 
-    # Test-only endpoint to verify error handler wiring
     @app.get("/__test/raise-feature-not-supported")
-    async def _raise_fns() -> None:  # pragma: no cover (covered by test)
+    async def _raise_fns() -> None:  # pragma: no cover
         raise FeatureNotSupportedError(
             feature="web_search", param="tools[0].type", provider="dashscope"
         )
 
+    @app.post("/v1/responses")
+    async def create_response(request: Request, payload: dict[str, Any]) -> Any:
+        provider = provider_from_model(payload.get("model", ""))
+        validator.validate(payload, provider=provider)
+
+        store_flag = payload.pop("store", config.session.default_store)
+        streaming = bool(payload.get("stream", False))
+
+        # Generate gateway-side id BEFORE calling LiteLLM. Streaming needs
+        # this so we can rewrite response.id in lifecycle events from the
+        # very first chunk, not after.
+        new_id = new_response_id()
+
+        resolved = await resolver.resolve(payload, current_provider=provider)
+
+        if not streaming:
+            response = await llm.call(request=resolved.request)
+            response["id"] = new_id
+            await recorder.record(
+                response_id=new_id,
+                original_request=payload,
+                response_payload=response,
+                provider=provider,
+                model=payload.get("model", ""),
+                session_id=resolved.session_id,
+                parent_id=resolved.parent_id,
+                store_flag=store_flag,
+            )
+            return response
+
+        # Streaming path: tee events to client, then persist final state on close.
+        async def _gen() -> AsyncIterator[bytes]:
+            bridge = StreamBridge(rewrite_id=new_id)
+            async for event in bridge.tee(llm.stream(request=resolved.request)):
+                yield f"data: {_json.dumps(event)}\n\n".encode()
+            final = bridge.final_state()
+            final["id"] = new_id
+            await recorder.record(
+                response_id=new_id,
+                original_request=payload,
+                response_payload=final,
+                provider=provider,
+                model=payload.get("model", ""),
+                session_id=resolved.session_id,
+                parent_id=resolved.parent_id,
+                store_flag=store_flag,
+            )
+            yield b"data: [DONE]\n\n"
+
+        return StreamingResponse(_gen(), media_type="text/event-stream")
+
     return app
 
 
-def run() -> None:  # entrypoint registered as `responses-gateway` script
+def run() -> None:
     import uvicorn
 
     cfg_path = os.getenv("GATEWAY_CONFIG", "config.yaml")
