@@ -4,24 +4,30 @@
 
 ## Quickstart
 
+### Option A — Docker Compose (gateway + Postgres in one shot)
+
 ```bash
-# 1. Install
+cp config.example.yaml config.yaml      # edit to taste
+cp models.example.yaml models.yaml      # add your provider api keys
+make docker-up                          # builds image + starts postgres + gateway
+make docker-logs                        # tail gateway logs
+```
+
+Migrations run on container startup; the gateway's `storage.url` is overridden via the `GATEWAY_STORAGE__URL` env var so it always reaches the compose Postgres regardless of what `config.yaml` says. Service is exposed on **`localhost:9090`** (mapped to 8080 inside the container).
+
+### Option B — Host-side dev loop (faster reload)
+
+```bash
 uv pip install -e ".[dev,postgres,s3]"
 
-# 2. Migrate DB (SQLite default, Postgres optional)
 mkdir -p data
-uv run alembic upgrade head
+docker compose up -d postgres                   # only the DB
+GATEWAY_STORAGE__URL=postgresql+asyncpg://gateway:gateway@localhost:5432/gateway_dev \
+  uv run alembic upgrade head
 
-# 3. Configure providers in models.yaml (see models.example.yaml)
+cp config.example.yaml config.yaml              # use `localhost` host
 cp models.example.yaml models.yaml
-# edit models.yaml with your API keys / model names
-
-# 4. Configure gateway (see config.example.yaml)
-cp config.example.yaml config.yaml
-
-# 5. Run
-make dev
-# or: uv run uvicorn gateway.api:app --port 8080
+make dev                                        # uvicorn --reload on port 8080
 ```
 
 ## Configuration

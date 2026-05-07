@@ -1,4 +1,4 @@
-.PHONY: install lock test test-unit test-integration test-e2e lint format typecheck migrate dev clean
+.PHONY: install lock test test-unit test-integration test-e2e lint format typecheck migrate dev clean docker-up docker-down docker-build docker-logs
 
 install:
 	uv pip install -e ".[dev,postgres,s3]"
@@ -37,3 +37,15 @@ dev:
 clean:
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	rm -rf .pytest_cache .mypy_cache .ruff_cache .coverage htmlcov dist build
+
+docker-build:
+	docker compose build gateway
+
+docker-up:
+	docker compose up -d
+
+docker-down:
+	docker compose down
+
+docker-logs:
+	docker compose logs -f gateway
