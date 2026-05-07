@@ -1,0 +1,26 @@
+# LiteLLM model_list — see https://docs.litellm.ai/docs/proxy/configs
+# The gateway loads this purely as an alias map: {model_name: litellm_string}.
+# Set API keys via env vars (DEEPSEEK_API_KEY, DASHSCOPE_API_KEY, etc.)
+
+model_list:
+  - model_name: deepseek/deepseek-chat
+    litellm_params:
+      model: deepseek/deepseek-chat
+      api_base: https://api.deepseek.com
+
+  - model_name: deepseek/deepseek-reasoner
+    litellm_params:
+      model: deepseek/deepseek-reasoner
+      api_base: https://api.deepseek.com
+
+  - model_name: dashscope/qwen-max
+    litellm_params:
+      model: dashscope/qwen-max
+
+  - model_name: moonshot/moonshot-v1-32k
+    litellm_params:
+      model: moonshot/moonshot-v1-32k
+
+  - model_name: openrouter/zhipu/glm-4.6
+    litellm_params:
+      model: openrouter/zhipu/glm-4.6
