@@ -106,14 +106,12 @@ class LLMRouter:
 
     async def call(self, *, request: dict[str, Any]) -> dict[str, Any]:
         try:
-            return cast(
-                dict[str, Any],
-                await litellm.aresponses(
-                    **self._resolve_request(request),
-                    timeout=self._cfg.request_timeout,
-                    num_retries=self._cfg.num_retries,
-                ),
+            response = await litellm.aresponses(
+                **self._resolve_request(request),
+                timeout=self._cfg.request_timeout,
+                num_retries=self._cfg.num_retries,
             )
+            return _event_to_dict(response)
         except Exception as exc:
             raise self._wrap(exc) from exc
 

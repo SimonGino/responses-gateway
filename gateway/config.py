@@ -65,11 +65,18 @@ class RejectConfig(BaseModel):
     mode: str = "reject"
 
     # Strip-mode only: ALSO drop tools whose `type` is not in this allow-list.
-    # Default = `["function"]` because non-cooperative clients (Codex) often
-    # send custom types like `namespace` that downstream chat/completions
-    # providers reject as illegal. Set to `[]` to disable allow-list filtering
-    # (only the explicit `tools` deny list will apply).
-    strip_mode_allowed_tool_types: list[str] = Field(default_factory=lambda: ["function"])
+    # Default keeps the tool types LiteLLM can actually pass through to non-
+    # OpenAI providers per the gap analysis §3:
+    #   - "function": client-side function calling (universal)
+    #   - "file_search": LiteLLM emulation via vector_stores (works on any provider)
+    #   - "mcp": pass-through (provider-dependent, but LiteLLM doesn't block it)
+    # Non-cooperative clients (Codex) often inject custom types like `namespace`
+    # that downstream chat/completions providers reject as illegal — those still
+    # get dropped. Set to `[]` to disable allow-list filtering (only the
+    # explicit `tools` deny list will apply).
+    strip_mode_allowed_tool_types: list[str] = Field(
+        default_factory=lambda: ["function", "file_search", "mcp"]
+    )
 
 
 class ServerConfig(BaseModel):

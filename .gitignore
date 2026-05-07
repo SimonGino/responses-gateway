@@ -16,6 +16,8 @@ __pycache__/
 venv/
 .env
 .env.local
+config.yaml
+models.yaml
 
 # Build / dist
 build/

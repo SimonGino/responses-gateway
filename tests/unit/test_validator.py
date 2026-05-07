@@ -170,8 +170,8 @@ def test_default_mode_is_reject() -> None:
 
 
 def test_strip_mode_drops_non_function_tool_types(strip_validator: Validator) -> None:
-    """Default allow-list is ['function']; namespace/custom types must be stripped
-    even though they aren't in the explicit deny list."""
+    """Default allow-list is ['function', 'file_search', 'mcp']; namespace/custom
+    types must be stripped even though they aren't in the explicit deny list."""
     request = {
         "input": "hi",
         "tools": [
@@ -187,7 +187,7 @@ def test_strip_mode_drops_non_function_tool_types(strip_validator: Validator) ->
 
 
 def test_strip_mode_allow_list_can_be_extended() -> None:
-    """User can add 'mcp' or other types to the allow list via config."""
+    """User can add types to the allow list via config."""
     cfg = RejectConfig(mode="strip", strip_mode_allowed_tool_types=["function", "mcp"])
     v = Validator(cfg)
     request = {
@@ -201,6 +201,24 @@ def test_strip_mode_allow_list_can_be_extended() -> None:
     v.validate(request)
     surviving = [t["type"] for t in request["tools"]]
     assert surviving == ["function", "mcp"]
+
+
+def test_strip_mode_default_allow_list_keeps_litellm_passthrough_tools(
+    strip_validator: Validator,
+) -> None:
+    """Default allow list must keep `file_search` and `mcp` tools — both are
+    LiteLLM passthrough/emulated capabilities per gap analysis §3."""
+    request = {
+        "input": "hi",
+        "tools": [
+            {"type": "function", "name": "f"},
+            {"type": "file_search", "vector_store_ids": ["vs_1"]},
+            {"type": "mcp", "server_label": "x"},
+        ],
+    }
+    stripped = strip_validator.validate(request)
+    assert stripped == []
+    assert [t["type"] for t in request["tools"]] == ["function", "file_search", "mcp"]
 
 
 def test_strip_mode_with_empty_allow_list_skips_unknown_filter() -> None:
