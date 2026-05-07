@@ -10,6 +10,9 @@ import yaml
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+ENV_PREFIX = "GATEWAY_"
+ENV_NESTED_DELIMITER = "__"
+
 
 class ColdStorageConfig(BaseModel):
     enabled: bool = False
@@ -63,8 +66,8 @@ class GatewayConfig(BaseSettings):
     """Top-level config. Env vars override YAML with `GATEWAY_<SECTION>__<FIELD>`."""
 
     model_config = SettingsConfigDict(
-        env_prefix="GATEWAY_",
-        env_nested_delimiter="__",
+        env_prefix=ENV_PREFIX,
+        env_nested_delimiter=ENV_NESTED_DELIMITER,
         case_sensitive=False,
     )
 
@@ -89,38 +92,48 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
 def _parse_env_overrides() -> dict[str, Any]:
     """Extract GATEWAY_* env vars and convert to nested dict.
 
-    GATEWAY_SERVER__PORT=8080 -> {'server': {'port': 8080}}
+    Examples:
+        GATEWAY_SERVER__PORT=8080 -> {'server': {'port': 8080}}
+        GATEWAY_STORAGE__COLD__ENABLED=true -> {'storage': {'cold': {'enabled': 'true'}}}
+
+    Note: ints are coerced; bool/float are left as strings and rely on Pydantic's
+    coercion when nested models are constructed.
     """
     result: dict[str, Any] = {}
-    prefix = "GATEWAY_"
     for key, value in os.environ.items():
-        if not key.startswith(prefix):
+        if not key.startswith(ENV_PREFIX):
             continue
-        # Remove prefix and convert to lowercase
-        remaining = key[len(prefix) :].lower()
-        parts = remaining.split("__")
+        remaining = key[len(ENV_PREFIX) :].lower()
+        parts = remaining.split(ENV_NESTED_DELIMITER)
 
-        # Navigate/create nested structure
         current = result
         for part in parts[:-1]:
             if part not in current:
                 current[part] = {}
             current = current[part]
 
-        # Try to convert value to int if it looks like a number
         try:
             current[parts[-1]] = int(value)
         except ValueError:
-            # Keep as string if not an int
             current[parts[-1]] = value
 
     return result
 
 
 def load_config(path: Path | str) -> GatewayConfig:
-    """Load YAML config, then layer env overrides on top.
+    """Load YAML config, then layer GATEWAY_* env overrides on top.
 
-    Env vars (GATEWAY_*) take precedence over YAML values.
+    Env vars take precedence over YAML values. If `path` does not exist, the
+    returned config is built from defaults plus any env overrides only.
+
+    Implementation note: pydantic-settings 2.x treats init kwargs as the
+    highest-priority source (above env vars). Passing the YAML data as
+    ``GatewayConfig(**yaml_data)`` would therefore *block* env overrides — the
+    opposite of what we want. We work around this by parsing env vars manually
+    and deep-merging them on top of YAML before instantiation. If
+    pydantic-settings adds a built-in YAML source we trust, this can be
+    replaced with ``settings_customise_sources`` returning
+    ``(env_settings, YamlConfigSettingsSource(...), ...)``.
     """
     p = Path(path)
     yaml_data: dict[str, Any] = {}
@@ -128,7 +141,6 @@ def load_config(path: Path | str) -> GatewayConfig:
         with p.open() as f:
             yaml_data = yaml.safe_load(f) or {}
 
-    # Merge YAML data with env var overrides
     env_overrides = _parse_env_overrides()
     merged_data = _deep_merge(yaml_data, env_overrides)
 

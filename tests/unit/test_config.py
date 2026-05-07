@@ -56,3 +56,23 @@ def test_missing_yaml_uses_defaults(tmp_path: Path) -> None:
     missing = tmp_path / "nope.yaml"
     cfg = load_config(missing)
     assert cfg.server.port == 8080  # default
+
+
+def test_three_level_nested_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`GATEWAY_STORAGE__COLD__ENABLED=true` must override yaml at depth 3."""
+    yaml_path = tmp_path / "config.yaml"
+    yaml_path.write_text("storage:\n  cold:\n    enabled: false\n")
+    monkeypatch.setenv("GATEWAY_STORAGE__COLD__ENABLED", "true")
+    cfg = load_config(yaml_path)
+    assert cfg.storage.cold.enabled is True
+
+
+def test_partial_yaml_only_overrides_specified_sections(tmp_path: Path) -> None:
+    """A YAML file with only one section should leave other sections at defaults."""
+    yaml_path = tmp_path / "config.yaml"
+    yaml_path.write_text("server:\n  port: 7777\n")
+    cfg = load_config(yaml_path)
+    assert cfg.server.port == 7777
+    # Other sections at defaults
+    assert cfg.session.default_ttl_days == 30
+    assert cfg.storage.url.startswith("sqlite+aiosqlite")

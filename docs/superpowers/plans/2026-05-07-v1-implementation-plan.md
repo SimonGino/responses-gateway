@@ -527,15 +527,71 @@ class GatewayConfig(BaseSettings):
     server: ServerConfig = Field(default_factory=ServerConfig)
 
 
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Recursively merge override dict into base; override wins."""
+    result = dict(base)
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def _parse_env_overrides() -> dict[str, Any]:
+    """Extract GATEWAY_* env vars and convert to nested dict.
+
+    GATEWAY_SERVER__PORT=8080 -> {'server': {'port': 8080}}
+    GATEWAY_STORAGE__COLD__ENABLED=true -> {'storage': {'cold': {'enabled': 'true'}}}
+
+    Note: ints are coerced; bools/floats are left as strings and rely on Pydantic's
+    coercion when nested models are constructed.
+    """
+    result: dict[str, Any] = {}
+    for key, value in os.environ.items():
+        if not key.startswith(ENV_PREFIX):
+            continue
+        remaining = key[len(ENV_PREFIX) :].lower()
+        parts = remaining.split(ENV_NESTED_DELIMITER)
+
+        current = result
+        for part in parts[:-1]:
+            if part not in current:
+                current[part] = {}
+            current = current[part]
+
+        try:
+            current[parts[-1]] = int(value)
+        except ValueError:
+            current[parts[-1]] = value
+
+    return result
+
+
 def load_config(path: Path | str) -> GatewayConfig:
-    """Load YAML config, then layer env overrides on top."""
-    yaml_data: dict[str, Any] = {}
+    """Load YAML config, then layer GATEWAY_* env overrides on top.
+
+    Env vars take precedence over YAML values. If `path` does not exist, the
+    returned config is built from defaults plus any env overrides only.
+
+    Implementation note: pydantic-settings 2.x treats init kwargs as the
+    highest-priority source (above env vars). Passing the YAML data as
+    ``GatewayConfig(**yaml_data)`` would therefore *block* env overrides — the
+    opposite of what we want. We work around this by parsing env vars manually
+    and deep-merging them on top of YAML before instantiation.
+    """
     p = Path(path)
+    yaml_data: dict[str, Any] = {}
     if p.exists():
         with p.open() as f:
             yaml_data = yaml.safe_load(f) or {}
-    return GatewayConfig(**yaml_data)
+
+    env_overrides = _parse_env_overrides()
+    merged_data = _deep_merge(yaml_data, env_overrides)
+    return GatewayConfig(**merged_data)
 ```
+
+Also add `ENV_PREFIX = "GATEWAY_"` and `ENV_NESTED_DELIMITER = "__"` module-level constants near the top of the file, and use them in the `model_config = SettingsConfigDict(env_prefix=ENV_PREFIX, env_nested_delimiter=ENV_NESTED_DELIMITER, ...)`.
 
 - [ ] **Step 3.3: Create `config.example.yaml`** (matches spec §6 verbatim — reference for users)
 
